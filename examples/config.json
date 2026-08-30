@@ -1,0 +1,21 @@
+{
+  "opnsense_url":   "https://10.0.0.1/api/unbound",
+  "loglevel": "INFO",
+  "domain":"local",
+  "db_path":        "/var/lib/leaselinkd/dhcpdb.sqlite",
+  "cron_schedule":  "*/5 * * * *",
+  "pgsql_host":"localhost",
+  "pgsql_user":"kea_user",
+  "pgsql_pass":"",
+  "pgsql_db":"kea",
+  "listen_type":"unix",
+  "socket_path":"/run/leaselinkd/fifo.pipe",
+  "tcp_host":"127.0.0.1",
+  "tcp_port":9080,
+  "throttle_seconds":10,
+  "health_check_seconds":60,
+  "initial_backoff_ms":100,
+  "max_backoff_ms":10000,
+  "api_timeout_seconds":5,
+  "api_test_timeout_seconds":60
+}

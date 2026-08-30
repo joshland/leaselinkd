@@ -1,0 +1,11 @@
+# Manager configuration is group-readable by the unprivileged service.
+d /etc/leaselinkd 0750 root leaselinkd -
+f /etc/leaselinkd/config.json 0640 root leaselinkd -
+# Secrets are read by PID 1 and passed to the service through LoadCredential.
+f /etc/leaselinkd/secrets.json 0600 root root -
+# Kea reads only its public transport configuration.
+d /etc/kea-dns-mgr 0755 root root -
+f /etc/kea-dns-mgr/config.json 0644 root root -
+# The daemon owns its runtime socket directory and persistent SQLite state.
+d /run/leaselinkd 0750 leaselinkd leaselinkd -
+d /var/lib/leaselinkd 0750 leaselinkd leaselinkd -

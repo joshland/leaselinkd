@@ -1,0 +1,5 @@
+# Type Name          ID GECOS                         Home
+g leaselinkd       -
+u leaselinkd       - "Kea Unbound manager service" /var/lib/leaselinkd
+# Permit Kea's run-script hook to traverse /run/leaselinkd and use its 0660 socket.
+m kea               leaselinkd

@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""Import active Kea DHCPv4 leases into leaselinkd once.
+
+The importer intentionally sends each lease's *remaining* lifetime.  This is
+not a full mirror: ordinary Kea lease hooks remain responsible for subsequent
+release and expiry events.
+"""
+
+import ipaddress
+import json
+import re
+import socket
+import time
+from pathlib import Path
+from typing import Annotated, Any
+from urllib.parse import urlparse
+
+import psycopg
+import typer
+
+app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+DEFAULT_KEA_CONFIG = Path("/etc/kea/kea-dhcp4.conf")
+DEFAULT_HOOK_CONFIG = Path("/etc/kea-dns-mgr/config.json")
+HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as source:
+            value = json.load(source)
+    except (OSError, json.JSONDecodeError) as error:
+        raise typer.BadParameter(f"cannot read valid JSON from {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise typer.BadParameter(f"{path} must contain a JSON object")
+    return value
+
+
+def database_from_kea_config(path: Path) -> dict[str, Any]:
+    root = load_json(path)
+    dhcp4 = root.get("Dhcp4")
+    if not isinstance(dhcp4, dict) or not isinstance(dhcp4.get("lease-database"), dict):
+        raise typer.BadParameter(f"{path} has no Dhcp4.lease-database object")
+    database = dhcp4["lease-database"]
+    if database.get("type") != "postgresql":
+        raise typer.BadParameter("only a PostgreSQL Kea lease database is supported")
+
+    # Kea calls its database name `name` and timeout `connect-timeout`; libpq
+    # calls them `dbname` and `connect_timeout`.
+    translated = {"name": "dbname", "connect-timeout": "connect_timeout"}
+    accepted = {"host", "port", "user", "password", "sslmode", "connect_timeout", "dbname"}
+    result: dict[str, Any] = {}
+    for key, value in database.items():
+        target = translated.get(key, key)
+        if target in accepted and isinstance(value, (str, int)):
+            result[target] = value
+    if not result.get("dbname"):
+        raise typer.BadParameter(f"{path} lease-database has no PostgreSQL name")
+    return result
+
+
+def manager_from_hook_config(path: Path) -> str:
+    value = load_json(path).get("leaselinkd_address")
+    if not isinstance(value, str) or not value:
+        raise typer.BadParameter(f"{path} has no leaselinkd_address")
+    return value
+
+
+def format_mac(value: Any) -> str:
+    if value is None:
+        return ""
+    raw = bytes(value)
+    return ":".join(f"{octet:02x}" for octet in raw)
+
+
+def normalized_hostname(hostname: str) -> str:
+    """Convert Kea's optional DNS root suffix to the manager's host label."""
+    return hostname[:-1] if hostname.endswith(".") else hostname
+
+
+def valid_manager_hostname(hostname: str) -> bool:
+    return HOST_LABEL.fullmatch(hostname) is not None
+
+
+def post_event(address: str, body: bytes, timeout_seconds: int) -> int:
+    parsed = urlparse(address)
+    request = (
+        b"POST /lease_event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+        + body
+    )
+    if parsed.scheme == "unix":
+        if not parsed.path:
+            raise typer.BadParameter("unix manager address must include a socket path")
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        destination: str | tuple[str, int] = parsed.path
+    elif parsed.scheme == "tcp":
+        if not parsed.hostname or not parsed.port:
+            raise typer.BadParameter("tcp manager address must include host and port")
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        destination = (parsed.hostname, parsed.port)
+    else:
+        raise typer.BadParameter("manager address must begin with unix:// or tcp://")
+
+    with connection:
+        connection.settimeout(timeout_seconds)
+        connection.connect(destination)
+        connection.sendall(request)
+        response = connection.recv(1024)
+    try:
+        return int(response.split(b" ", 2)[1])
+    except (IndexError, ValueError) as error:
+        raise RuntimeError("manager returned an invalid HTTP response") from error
+
+
+@app.command()
+def sync(
+    dsn: Annotated[str | None, typer.Option(help="PostgreSQL connection string.")] = None,
+    db_host: Annotated[str | None, typer.Option(help="PostgreSQL host.")] = None,
+    db_port: Annotated[int | None, typer.Option(help="PostgreSQL port.")] = None,
+    db_name: Annotated[str | None, typer.Option(help="PostgreSQL database name.")] = None,
+    db_user: Annotated[str | None, typer.Option(help="PostgreSQL user.")] = None,
+    db_password: Annotated[str | None, typer.Option(help="PostgreSQL password; prefer --db-password-file.")] = None,
+    db_password_file: Annotated[Path | None, typer.Option(help="File containing the PostgreSQL password.")] = None,
+    kea_config: Annotated[Path, typer.Option(help="Kea JSON config used when no database option is given.")] = DEFAULT_KEA_CONFIG,
+    manager_address: Annotated[str | None, typer.Option(help="unix:///socket or tcp://host:port.")] = None,
+    hook_config: Annotated[Path, typer.Option(help="Hook config used when --manager-address is omitted.")] = DEFAULT_HOOK_CONFIG,
+    timeout_seconds: Annotated[int, typer.Option(min=1, max=3600)] = 5,
+    dry_run: Annotated[bool, typer.Option(help="List eligible leases without posting them.")] = False,
+) -> None:
+    """Send active, named Kea IPv4 leases to the running manager."""
+    explicit = (db_host, db_port, db_name, db_user, db_password, db_password_file)
+    if dsn and any(value is not None for value in explicit):
+        raise typer.BadParameter("--dsn cannot be combined with --db-* options")
+    if any(value is not None for value in explicit) and not all((db_host, db_name, db_user)):
+        raise typer.BadParameter("--db-host, --db-name, and --db-user are required together")
+    if db_password and db_password_file:
+        raise typer.BadParameter("use only one of --db-password and --db-password-file")
+
+    if dsn:
+        connect_args: str | dict[str, Any] = dsn
+    elif any(value is not None for value in explicit):
+        connect_args = {"host": db_host, "port": db_port or 5432, "dbname": db_name, "user": db_user}
+        if db_password_file:
+            try:
+                connect_args["password"] = db_password_file.read_text(encoding="utf-8").rstrip("\r\n")
+            except OSError as error:
+                raise typer.BadParameter(f"cannot read {db_password_file}: {error}") from error
+        elif db_password:
+            connect_args["password"] = db_password
+    else:
+        connect_args = database_from_kea_config(kea_config)
+
+    address = manager_address or manager_from_hook_config(hook_config)
+    scan_timestamp = int(time.time())
+    sent = skipped = duplicates = 0
+    query = """
+        SELECT address, hwaddr, hostname,
+               FLOOR(EXTRACT(EPOCH FROM expire - CURRENT_TIMESTAMP))::bigint AS remaining_lifetime
+          FROM lease4
+         WHERE state = 0 AND expire > CURRENT_TIMESTAMP
+           AND hostname IS NOT NULL AND hostname <> ''
+         ORDER BY hostname, expire DESC, address
+    """
+    try:
+        if isinstance(connect_args, str):
+            database_connection = psycopg.connect(connect_args)
+        else:
+            database_connection = psycopg.connect(**connect_args)
+        with database_connection as connection, connection.cursor() as cursor:
+            cursor.execute(query)
+            candidates: dict[str, tuple[Any, Any, int]] = {}
+            duplicate_names: set[str] = set()
+            for address_value, hardware, raw_hostname, remaining in cursor:
+                hostname = normalized_hostname(raw_hostname)
+                if hostname != raw_hostname:
+                    typer.echo(f"NORMALIZED {raw_hostname!r} to {hostname!r}", err=True)
+                if not valid_manager_hostname(hostname):
+                    typer.echo(f"SKIP invalid hostname {raw_hostname!r}; manager requires one DNS host label", err=True)
+                    skipped += 1
+                    continue
+                if remaining <= 0:
+                    skipped += 1
+                    continue
+                ip = ipaddress.IPv4Address(int(address_value) & 0xFFFFFFFF)
+                if ip.is_loopback:
+                    typer.echo(f"SKIP loopback address {ip} for {hostname!r}", err=True)
+                    skipped += 1
+                    continue
+                if hostname in candidates:
+                    duplicate_names.add(hostname)
+                    continue
+                candidates[hostname] = (ip, hardware, remaining)
+
+            for hostname, (ip, hardware, remaining) in candidates.items():
+                if hostname in duplicate_names:
+                    duplicates += 1
+                    typer.echo(f"SKIP duplicate hostname {hostname!r}; manager supports one IPv4 address per hostname", err=True)
+                    continue
+                event = {
+                    "event": "lease4_committed",
+                    "timestamp": scan_timestamp,
+                    "lease": {
+                        "hostname": hostname,
+                        "ip-address": str(ip),
+                        "mac-address": format_mac(hardware),
+                        "valid-lifetime": str(remaining),
+                    },
+                }
+                if dry_run:
+                    typer.echo(f"DRY-RUN {hostname} {ip} remaining={remaining}s")
+                    sent += 1
+                    continue
+                status = post_event(address, json.dumps(event, separators=(",", ":")).encode(), timeout_seconds)
+                if status != 202:
+                    raise RuntimeError(f"manager rejected {hostname} ({ip}): HTTP {status}")
+                typer.echo(f"SYNCED {hostname} {ip} remaining={remaining}s")
+                sent += 1
+    except psycopg.Error as error:
+        typer.echo(f"ERROR: PostgreSQL query failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, RuntimeError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    typer.echo(f"Summary: synced={sent} skipped={skipped} duplicate_rows={duplicates}")
+    if duplicates:
+        raise typer.Exit(code=1)
+
+
+if __name__ == "__main__":
+    app()

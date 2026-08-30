@@ -1,0 +1,5 @@
+references/
+.zig-cache
+zig-out
+*.pem
+__pycache__
