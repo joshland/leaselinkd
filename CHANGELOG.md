@@ -2,6 +2,22 @@
 
 All notable development work is documented here. This project follows semantic versioning; entries describe development milestones and may be packaged together when a release is built.
 
+## 2.1.0 — Operational resynchronization
+
+- Added `SIGUSR2` to request an immediate SQLite-to-OPNsense resync through
+  the daemon's serialized reconciliation path.
+- Added `dns_servers` for native UDP A-record validation before updates and
+  during startup reconciliation, including redundant-update, mismatch, and
+  multiple-record logging.
+- Queue missing or mismatched DNS records for immediate OPNsense update during
+  startup validation.
+- Restart an already-running `leaselinkd.service` after package upgrades
+  without enabling or starting an inactive service.
+- Reload the systemd manager after package installation and upgrades before
+  restarting the active daemon.
+- Renamed the Kea PostgreSQL lease importer to `keadb-leaselinkd-sync` and
+  added its `--version` report alongside its existing `--help` output.
+
 ## 2.0.1 — Configuration and documentation alignment
 
 - Moved the Kea hook transport configuration to `/etc/leaselinkd/hook.json`.
@@ -10,8 +26,20 @@ All notable development work is documented here. This project follows semantic v
 - Expanded `check-kea-config.py` to report the status of required Kea DHCPv4
   keys, run-script parameters, installed hook executable, and hook transport
   configuration values.
+- Corrected the validator to inspect Kea's `hooks-libraries` array and report
+  the required `parameters.name` path for `kea-leaselink`.
 - Corrected legacy product names and Kea's unprefixed `LEASE4_*` and
   `LEASES4_*` hook environment-variable references in the documentation.
+- Removed unused PostgreSQL connection and cron-scheduling fields from the
+  manager configuration and secrets examples. PostgreSQL remains isolated to
+  the explicitly invoked `keadb-leaselinkd-sync` import utility.
+- Fixed `leaselinkd --config-check` to validate SQLite path access without
+  creating or modifying the configured ledger.
+- Added `scripts/buildnumber.sh` to increment the Arch package `pkgrel`
+  independently of the application version, interactively or with `--add`,
+  and to reset it to `1` with `--reset`.
+- Fixed the packaged `/etc/leaselinkd` directory mode at `0750` so upgrades
+  match the tmpfiles policy and do not produce a pacman permission warning.
 
 ## 2.0.0 — Durable lease delivery and reconciliation
 
@@ -24,7 +52,7 @@ All notable development work is documented here. This project follows semantic v
   installed script. Update Kea's run-script `name` setting when deploying.
 - Moved the OPNsense provisioning script into the package and installed it as
   `/usr/share/leaselinkd/provision-opnsense-leaselinkd.php`.
-- Added the packaged `leaselinkd-sync` one-shot importer for active Kea
+- Added the packaged Kea PostgreSQL one-shot importer for active Kea
   PostgreSQL IPv4 leases. It can read the existing Kea lease-database settings
   or accept explicit connection parameters, and preserves remaining lifetime
   when seeding durable manager state.

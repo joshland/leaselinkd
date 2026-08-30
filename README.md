@@ -18,6 +18,14 @@ sudoedit /etc/leaselinkd/secrets.json
 sudo systemctl enable --now leaselinkd.service
 ```
 
+To create a new Arch package build without changing the application version,
+increment `pkgrel` with `scripts/buildnumber.sh`. It asks for confirmation by
+default; use `scripts/buildnumber.sh --add` for a non-interactive increment
+or `scripts/buildnumber.sh --reset` to set `pkgrel` back to `1`.
+
+When upgrading the package, an already-running `leaselinkd.service` is
+automatically restarted. An inactive service remains inactive.
+
 The package declares `kea`, `sqlite`, `systemd`, `ca-certificates`, `openssl`,
 and Python with Psycopg and Typer as runtime dependencies. `zig` is a build
 dependency; Python also powers the one-shot lease importer and the package test
@@ -33,7 +41,7 @@ The package installs:
 | `/usr/share/leaselinkd/trust-firewall-certificate.sh` | Install a trusted firewall CA into Arch's system trust store |
 | `/usr/share/leaselinkd/check-firewall-certificate.sh` | Diagnose firewall certificate identity, extensions, and trust-chain failures |
 | `/usr/share/leaselinkd/check-kea-config.py` | Validate Kea DDNS, run-script settings, and hook transport configuration |
-| `/usr/share/leaselinkd/leaselinkd-sync` | One-shot import of active Kea PostgreSQL leases |
+| `/usr/share/leaselinkd/keadb-leaselinkd-sync` | One-shot import of active Kea PostgreSQL leases |
 | `/etc/leaselinkd/config.json` | Non-secret manager settings |
 | `/etc/leaselinkd/secrets.json` | OPNsense credentials |
 | `/etc/leaselinkd/hook.json` | Hook transport setting |
@@ -57,6 +65,7 @@ For the equivalent WebGUI-only procedure, see
   "socket_path": "/run/leaselinkd/fifo.pipe",
   "tcp_host": "127.0.0.1",
   "tcp_port": 9080,
+  "dns_servers": ["10.0.0.1:53"],
   "throttle_seconds": 10,
   "health_check_seconds": 60,
   "initial_backoff_ms": 100,
@@ -82,6 +91,7 @@ The default transport is a Unix socket. To use local TCP instead, set `listen_ty
 ```
 
 `api_timeout_seconds` limits each manager-to-OPNsense API call (default `5`), while `api_test_timeout_seconds` sets the complete `--api-test` deadline (default `60`). `timeout_seconds` limits the hook's complete connection, send, and response sequence to the manager (default `2`). All timeout values must be between 1 and 3600 seconds.
+`dns_servers` lists IPv4 UDP resolver endpoints used to validate A records. Each endpoint is `ADDRESS` or `ADDRESS:PORT`; port `53` is used when omitted. An empty list disables DNS validation for backward-compatible deployments. Before applying a desired record, `leaselinkd` queries every configured resolver; a matching address is logged as redundant and avoids an OPNsense write. Startup validates every desired hostname, logging `ERROR` for missing or mismatched records and `WARN` for multiple A records. Missing or mismatched records are queued immediately for an OPNsense update.
 `queue_max_events` bounds the startup-only in-memory lease queue (default and maximum `512`). The manager accepts and coalesces burst events by hostname, serializes firewall writes, and drains queued work after SIGTERM/SIGINT while systemd's stop grace period remains available. One dedicated API worker owns a persistent HTTP/1.1 client, so normal serialized writes reuse its firewall connection. If an API call reaches its deadline or the worker connection fails, the manager terminates that worker and starts a fresh one for the next request; a timed-out mutation is not retried automatically because its remote outcome is unknown.
 
 Lease intake is durable: a `202` means the latest desired state has committed to SQLite, where it survives restarts and coalesces subsequent events for the same hostname. `record_ttl_seconds` defaults to 86400; expiry turns an unrefreshed record into a durable delete. `reconcile_seconds` defaults to 300 and removes remote overrides carrying this manager's ownership marker when no desired record remains. Managed descriptions end in `; leaselinkd:<hostname>:<owner-id>`, where the random owner ID lets reconciliation identify stale records and duplicates without touching manual overrides.
@@ -92,8 +102,10 @@ After starting the manager and before relying on future Kea hook events, import
 active named leases once with:
 
 ```sh
-sudo /usr/share/leaselinkd/leaselinkd-sync
+sudo /usr/share/leaselinkd/keadb-leaselinkd-sync
 ```
+
+Use `--help` to view importer options or `--version` to report its release.
 
 When no database options are supplied, the importer reads PostgreSQL connection
 details from `Dhcp4.lease-database` in `/etc/kea/kea-dhcp4.conf`; run it as a
@@ -102,7 +114,7 @@ user permitted to read that file. It reads the manager address from
 more appropriate, including a password file to avoid command-history exposure:
 
 ```sh
-sudo /usr/share/leaselinkd/leaselinkd-sync \
+sudo /usr/share/leaselinkd/keadb-leaselinkd-sync \
   --db-host 127.0.0.1 --db-port 5432 --db-name kea --db-user kea \
   --db-password-file /etc/kea/lease-db-password
 ```
@@ -243,6 +255,15 @@ journalctl -u leaselinkd.service -n 30
 
 The snapshot includes active configuration (excluding secrets), runtime, received lease events, API GET/POST and failure counts, health-check counts, and completed reconfigures.
 
+Request an immediate SQLite-to-OPNsense resync with SIGUSR2:
+
+```sh
+sudo systemctl kill -s USR2 leaselinkd.service
+```
+
+The manager removes stale owned overrides, queues current SQLite desired records
+for reapplication, and coalesces any required Unbound reconfigure.
+
 ## Development
 
 Build and run the automated checks:
@@ -255,4 +276,7 @@ The integration test starts the real manager on a temporary Unix socket, invokes
 
 ## Current scope
 
-The event-driven lease-to-Unbound path is implemented. The PostgreSQL/cron reconciliation fields retained in the example configuration are reserved for the planned reconciliation feature and are not currently used by the manager.
+The event-driven lease-to-Unbound path is implemented. `leaselinkd` does not
+connect to PostgreSQL or use cron-scheduling configuration. The separate
+`keadb-leaselinkd-sync` utility can optionally import active leases from Kea's
+PostgreSQL lease database.

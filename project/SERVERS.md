@@ -11,6 +11,6 @@ The solution involves two logical servers residing on the same host:
    * Listens on an AF_UNIX socket at `/run/leaselinkd/fifo.pipe` (default). TCP mode can be switched by editing the config (`listen_type="tcp"`).
    * Starts a background goroutine that:
      * Performs health‑checks every `health_check_seconds`.
-     * On success schedules a reconciliation on system boot and at times specified by the cron expression in the configuration.
+     * Reconciles SQLite desired state with managed OPNsense overrides at startup and on the configured interval.
 
 Both components are installed via the single AUR package `leaselinkd`. The `leaselinkd.service` systemd unit handles the manager lifecycle; Kea invokes `kea-leaselink` for each lease event.

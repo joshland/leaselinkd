@@ -1,0 +1,8 @@
+post_install() {
+    systemctl daemon-reload || true
+}
+
+post_upgrade() {
+    systemctl daemon-reload || true
+    systemctl try-restart leaselinkd.service || true
+}

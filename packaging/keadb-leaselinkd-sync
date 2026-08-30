@@ -10,12 +10,18 @@ import ipaddress
 import json
 import re
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
-import psycopg
+VERSION = "2.1.0"
+
+if __name__ == "__main__" and sys.argv[1:] == ["--version"]:
+    print(f"keadb-leaselinkd-sync {VERSION}")
+    raise SystemExit(0)
+
 import typer
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -129,6 +135,12 @@ def sync(
     dry_run: Annotated[bool, typer.Option(help="List eligible leases without posting them.")] = False,
 ) -> None:
     """Send active, named Kea IPv4 leases to the running manager."""
+    try:
+        import psycopg
+    except ImportError as error:
+        typer.echo("ERROR: psycopg is required to import Kea PostgreSQL leases", err=True)
+        raise typer.Exit(code=1) from error
+
     explicit = (db_host, db_port, db_name, db_user, db_password, db_password_file)
     if dsn and any(value is not None for value in explicit):
         raise typer.BadParameter("--dsn cannot be combined with --db-* options")

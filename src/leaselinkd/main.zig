@@ -17,13 +17,15 @@ const c = @cImport({
     @cInclude("sys/wait.h");
     @cInclude("sqlite3.h");
 });
-const Config = struct { opnsense_url: []const u8, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
+const Config = struct { opnsense_url: []const u8, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, dns_servers: []const []const u8 = &.{}, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
 const Secrets = struct { api_key: ?[]const u8 = null, apik_key: ?[]const u8 = null, api_secret: ?[]const u8 = null, apikey_secret: ?[]const u8 = null };
 const max_pending_events = 512;
 const PendingEvent = struct { body: []u8, hostname: []u8 };
+const LoadedConfiguration = struct { config: Config, key: []const u8, secret: []const u8 };
 const Runtime = struct { config: Config, key: []const u8, secret: []const u8, db: *c.sqlite3, io: std.Io, started_at: i64, api_worker_fd: c_int = -1, api_worker_pid: c_int = -1, reconfigure_due: ?i64 = null, health_due: i64 = 0, reconcile_due: i64 = 0, health_backoff_ms: i64 = 100, lease_events: u64 = 0, api_calls: u64 = 0, api_get_calls: u64 = 0, api_post_calls: u64 = 0, api_failures: u64 = 0, reconfigures: u64 = 0, health_checks: u64 = 0, health_failures: u64 = 0 };
 const Desired = struct { hostname: []const u8, owner_id: []const u8, ip: []const u8, present: bool, expires_at: i64, uuid: ?[]const u8 = null };
 var report_requested: std.atomic.Value(u8) = .init(0);
+var resync_requested: std.atomic.Value(u8) = .init(0);
 var shutdown_requested: std.atomic.Value(u8) = .init(0);
 const Command = enum { run, config_check, api_test };
 const CommandOptions = struct { command: Command = .run, config_path: ?[]const u8 = null, secrets_path: ?[]const u8 = null, loglevel_set: bool = false };
@@ -40,11 +42,11 @@ pub fn main(init: std.process.Init) !void {
     switch (options.command) {
         .run => try run(init, allocator, options),
         .config_check => {
-            var runtime = try loadRuntime(init, allocator, options);
-            defer _ = c.sqlite3_close(runtime.db);
-            try validateConfig(&runtime.config);
+            const loaded = try loadConfiguration(init, allocator, options);
+            try validateConfig(&loaded.config);
+            try validateSqliteAccess(allocator, loaded.config.db_path);
             common.log(.INFO, "configuration check passed", .{});
-            logConfiguration(&runtime, false);
+            logConfiguration(&loaded.config, false);
         },
         .api_test => {
             try runApiTest(init, allocator, options);
@@ -83,12 +85,16 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
     defer _ = c.close(fd);
     defer if (unix_mode) std.Io.Dir.cwd().deleteFile(init.io, runtime.config.socket_path) catch {};
     _ = c.signal(c.SIGUSR1, onSigusr1);
+    _ = c.signal(c.SIGUSR2, onSigusr2);
     _ = c.signal(c.SIGTERM, onShutdown);
     _ = c.signal(c.SIGINT, onShutdown);
     common.log(.INFO, "leaselinkd v{s} starting; architecture={s}; loglevel={s}", .{ common.version, @tagName(builtin.cpu.arch), @tagName(common.logLevel()) });
     common.log(.INFO, "listening via {s}", .{runtime.config.listen_type});
-    logConfiguration(&runtime, false);
+    logConfiguration(&runtime.config, false);
     healthCheck(&runtime, allocator, true);
+    reconcile(&runtime, allocator) catch |err| common.log(.WARN, "startup OPNsense reconciliation failed: {t}", .{err});
+    runtime.reconcile_due = nowSeconds() + runtime.config.reconcile_seconds;
+    validateDnsState(&runtime);
     while (true) {
         if (shutdown_requested.load(.acquire) != 0) {
             common.log(.INFO, "shutdown requested; durable work remains in SQLite for the next start", .{});
@@ -104,8 +110,11 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
             } else break;
         };
         if (report_requested.swap(0, .acq_rel) != 0) {
-            logConfiguration(&runtime, false);
+            logConfiguration(&runtime.config, false);
             logMetrics(&runtime);
+        }
+        if (resync_requested.swap(0, .acq_rel) != 0) {
+            forceResync(&runtime, allocator);
         }
         serviceTimers(&runtime, allocator);
     }
@@ -168,20 +177,35 @@ fn validateConfig(config: *const Config) !void {
     } else if (std.mem.eql(u8, config.listen_type, "tcp")) {
         if (config.tcp_host.len == 0 or config.tcp_port == 0) return error.InvalidTcpConfiguration;
     } else return error.InvalidListenType;
+    for (config.dns_servers) |server| _ = try dnsServerAddress(server);
 }
 fn onSigusr1(_: c_int) callconv(.c) void {
     report_requested.store(1, .release);
 }
+fn onSigusr2(_: c_int) callconv(.c) void {
+    resync_requested.store(1, .release);
+}
 fn onShutdown(_: c_int) callconv(.c) void {
     shutdown_requested.store(1, .release);
 }
-fn logConfiguration(r: *const Runtime, debug: bool) void {
-    if (debug) common.log(.DEBUG, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ r.config.opnsense_url, r.config.listen_type, r.config.socket_path, r.config.tcp_host, r.config.tcp_port, r.config.domain, r.config.throttle_seconds, r.config.health_check_seconds, r.config.api_timeout_seconds, r.config.api_test_timeout_seconds }) else common.log(.INFO, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ r.config.opnsense_url, r.config.listen_type, r.config.socket_path, r.config.tcp_host, r.config.tcp_port, r.config.domain, r.config.throttle_seconds, r.config.health_check_seconds, r.config.api_timeout_seconds, r.config.api_test_timeout_seconds });
+fn logConfiguration(config: *const Config, debug: bool) void {
+    if (debug) common.log(.DEBUG, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ config.opnsense_url, config.listen_type, config.socket_path, config.tcp_host, config.tcp_port, config.domain, config.throttle_seconds, config.health_check_seconds, config.api_timeout_seconds, config.api_test_timeout_seconds }) else common.log(.INFO, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ config.opnsense_url, config.listen_type, config.socket_path, config.tcp_host, config.tcp_port, config.domain, config.throttle_seconds, config.health_check_seconds, config.api_timeout_seconds, config.api_test_timeout_seconds });
 }
 fn logMetrics(r: *const Runtime) void {
     common.log(.INFO, "metrics: runtime={d}s lease_events={d} api_calls={d} get={d} post={d} api_failures={d} health_checks={d} health_failures={d} reconfigures={d}", .{ nowSeconds() - r.started_at, r.lease_events, r.api_calls, r.api_get_calls, r.api_post_calls, r.api_failures, r.health_checks, r.health_failures, r.reconfigures });
 }
 fn loadRuntime(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOptions) !Runtime {
+    const loaded = try loadConfiguration(init, allocator, options);
+    const db_path = try allocator.dupeZ(u8, loaded.config.db_path);
+    var db: ?*c.sqlite3 = null;
+    if (c.sqlite3_open(db_path.ptr, &db) != c.SQLITE_OK) return error.SqliteOpenFailed;
+    errdefer _ = c.sqlite3_close(db);
+    try sql(db.?, "PRAGMA journal_mode=WAL;");
+    try sql(db.?, "CREATE TABLE IF NOT EXISTS overrides (hostname TEXT PRIMARY KEY, uuid TEXT NOT NULL, ip_address TEXT NOT NULL);");
+    try sql(db.?, "CREATE TABLE IF NOT EXISTS desired_overrides (hostname TEXT PRIMARY KEY, owner_id TEXT NOT NULL, ip_address TEXT NOT NULL, present INTEGER NOT NULL, expires_at INTEGER NOT NULL, uuid TEXT, dirty INTEGER NOT NULL DEFAULT 1, next_attempt INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0);");
+    return .{ .config = loaded.config, .key = loaded.key, .secret = loaded.secret, .db = db.?, .io = init.io, .started_at = nowSeconds(), .health_backoff_ms = loaded.config.initial_backoff_ms, .reconcile_due = nowSeconds() };
+}
+fn loadConfiguration(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOptions) !LoadedConfiguration {
     const config_path = options.config_path orelse init.minimal.environ.getPosix("LEASELINKD_CONFIG") orelse "/etc/leaselinkd/config.json";
     const secrets_path = options.secrets_path orelse init.minimal.environ.getPosix("LEASELINKD_SECRETS") orelse "/etc/leaselinkd/secrets.json";
     const cb = try std.Io.Dir.cwd().readFileAlloc(init.io, config_path, allocator, .limited(128 * 1024));
@@ -191,14 +215,24 @@ fn loadRuntime(init: std.process.Init, allocator: std.mem.Allocator, options: Co
     const secrets = try std.json.parseFromSliceLeaky(Secrets, allocator, sb, .{ .ignore_unknown_fields = true });
     const key = secrets.api_key orelse secrets.apik_key orelse return error.MissingApiKey;
     const secret = secrets.api_secret orelse secrets.apikey_secret orelse return error.MissingApiSecret;
-    const db_path = try allocator.dupeZ(u8, config.db_path);
+    return .{ .config = config, .key = key, .secret = secret };
+}
+fn validateSqliteAccess(allocator: std.mem.Allocator, db_path: []const u8) !void {
+    const db_path_z = try allocator.dupeZ(u8, db_path);
+    const directory = if (std.mem.lastIndexOfScalar(u8, db_path, '/')) |separator|
+        if (separator == 0) "/" else db_path[0..separator]
+    else
+        ".";
+    const directory_z = try allocator.dupeZ(u8, directory);
+    if (c.access(directory_z.ptr, c.W_OK | c.X_OK) != 0) return error.SqliteDirectoryAccessFailed;
+    if (c.access(db_path_z.ptr, c.F_OK) != 0) return;
+    if (c.access(db_path_z.ptr, c.R_OK | c.W_OK) != 0) return error.SqliteFileAccessFailed;
     var db: ?*c.sqlite3 = null;
-    if (c.sqlite3_open(db_path.ptr, &db) != c.SQLITE_OK) return error.SqliteOpenFailed;
-    errdefer _ = c.sqlite3_close(db);
-    try sql(db.?, "PRAGMA journal_mode=WAL;");
-    try sql(db.?, "CREATE TABLE IF NOT EXISTS overrides (hostname TEXT PRIMARY KEY, uuid TEXT NOT NULL, ip_address TEXT NOT NULL);");
-    try sql(db.?, "CREATE TABLE IF NOT EXISTS desired_overrides (hostname TEXT PRIMARY KEY, owner_id TEXT NOT NULL, ip_address TEXT NOT NULL, present INTEGER NOT NULL, expires_at INTEGER NOT NULL, uuid TEXT, dirty INTEGER NOT NULL DEFAULT 1, next_attempt INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0);");
-    return .{ .config = config, .key = key, .secret = secret, .db = db.?, .io = init.io, .started_at = nowSeconds(), .health_backoff_ms = config.initial_backoff_ms, .reconcile_due = nowSeconds() };
+    if (c.sqlite3_open_v2(db_path_z.ptr, &db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK) {
+        if (db) |opened| _ = c.sqlite3_close(opened);
+        return error.SqliteOpenFailed;
+    }
+    defer _ = c.sqlite3_close(db);
 }
 fn listenUnix(path: []const u8) !c_int {
     if (path.len >= 108) return error.NameTooLong;
@@ -233,6 +267,147 @@ fn listenTcp(host: []const u8, port: u16) !c_int {
 fn nowSeconds() i64 {
     return @intCast(c.time(null));
 }
+const DnsAnswer = struct { addresses: usize = 0, matches: bool = false };
+fn dnsServerAddress(server: []const u8) !c.struct_sockaddr_in {
+    var host = server;
+    var port: u16 = 53;
+    if (std.mem.lastIndexOfScalar(u8, server, ':')) |at| {
+        host = server[0..at];
+        port = std.fmt.parseInt(u16, server[at + 1 ..], 10) catch return error.InvalidDnsServer;
+    }
+    if (host.len == 0 or port == 0) return error.InvalidDnsServer;
+    const host_z = try std.heap.page_allocator.dupeZ(u8, host);
+    var address = std.mem.zeroes(c.struct_sockaddr_in);
+    address.sin_family = c.AF_INET;
+    address.sin_port = c.htons(port);
+    if (c.inet_pton(c.AF_INET, host_z.ptr, &address.sin_addr) != 1) return error.InvalidDnsServer;
+    return address;
+}
+fn writeDnsName(buffer: []u8, index: *usize, name: []const u8) !void {
+    var labels = std.mem.splitScalar(u8, name, '.');
+    while (labels.next()) |label| {
+        if (label.len == 0) continue;
+        if (label.len > 63 or index.* + label.len + 1 > buffer.len) return error.InvalidDnsName;
+        buffer[index.*] = @intCast(label.len);
+        index.* += 1;
+        @memcpy(buffer[index.* .. index.* + label.len], label);
+        index.* += label.len;
+    }
+    if (index.* >= buffer.len) return error.InvalidDnsName;
+    buffer[index.*] = 0;
+    index.* += 1;
+}
+fn skipDnsName(buffer: []const u8, index: *usize) !void {
+    while (true) {
+        if (index.* >= buffer.len) return error.InvalidDnsReply;
+        const length = buffer[index.*];
+        if (length & 0xc0 == 0xc0) {
+            if (index.* + 1 >= buffer.len) return error.InvalidDnsReply;
+            index.* += 2;
+            return;
+        }
+        index.* += 1;
+        if (length == 0) return;
+        if (length > 63 or index.* + length > buffer.len) return error.InvalidDnsReply;
+        index.* += length;
+    }
+}
+fn readU16(buffer: []const u8, index: *usize) !u16 {
+    if (index.* + 2 > buffer.len) return error.InvalidDnsReply;
+    const value = (@as(u16, buffer[index.*]) << 8) | buffer[index.* + 1];
+    index.* += 2;
+    return value;
+}
+fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: []const u8) !DnsAnswer {
+    const address = try dnsServerAddress(server);
+    var wanted: [4]u8 = undefined;
+    const ip_z = try std.heap.page_allocator.dupeZ(u8, ip);
+    if (c.inet_pton(c.AF_INET, ip_z.ptr, &wanted) != 1) return error.InvalidLeaseAddress;
+    var query: [512]u8 = [_]u8{0} ** 512;
+    const id: u16 = @truncate(@as(u64, @intCast(nowSeconds())));
+    query[0] = @truncate(id >> 8);
+    query[1] = @truncate(id);
+    query[2] = 1;
+    var query_len: usize = 12;
+    var fullname: [255]u8 = undefined;
+    const name = std.fmt.bufPrint(&fullname, "{s}.{s}", .{ hostname, domain }) catch return error.InvalidDnsName;
+    try writeDnsName(&query, &query_len, name);
+    query[query_len] = 0;
+    query_len += 1;
+    query[query_len] = 1;
+    query_len += 1;
+    query[query_len] = 0;
+    query_len += 1;
+    query[query_len] = 1;
+    query_len += 1;
+    const fd = c.socket(c.AF_INET, c.SOCK_DGRAM, 0);
+    if (fd < 0) return error.DnsSocketFailed;
+    defer _ = c.close(fd);
+    if (c.sendto(fd, &query, query_len, 0, @ptrCast(&address), @sizeOf(c.struct_sockaddr_in)) < 0) return error.DnsSendFailed;
+    var ready = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
+    if (c.poll(&ready, 1, 2000) <= 0) return error.DnsTimeout;
+    var reply: [2048]u8 = undefined;
+    const received = c.recv(fd, &reply, reply.len, 0);
+    if (received < 12) return error.InvalidDnsReply;
+    const bytes = reply[0..@intCast(received)];
+    if (bytes[0] != query[0] or bytes[1] != query[1] or (bytes[3] & 0x0f) != 0) return error.DnsLookupFailed;
+    var index: usize = 4;
+    const questions = try readU16(bytes, &index);
+    const answers = try readU16(bytes, &index);
+    index = 12;
+    for (0..questions) |_| {
+        try skipDnsName(bytes, &index);
+        index += 4;
+        if (index > bytes.len) return error.InvalidDnsReply;
+    }
+    var result = DnsAnswer{};
+    for (0..answers) |_| {
+        try skipDnsName(bytes, &index);
+        const record_type = try readU16(bytes, &index);
+        const record_class = try readU16(bytes, &index);
+        if (index + 6 > bytes.len) return error.InvalidDnsReply;
+        index += 4;
+        const length = try readU16(bytes, &index);
+        if (index + length > bytes.len) return error.InvalidDnsReply;
+        if (record_type == 1 and record_class == 1 and length == 4) {
+            result.addresses += 1;
+            if (std.mem.eql(u8, bytes[index .. index + 4], &wanted)) result.matches = true;
+        }
+        index += length;
+    }
+    return result;
+}
+fn validateDnsRecord(r: *Runtime, hostname: []const u8, ip: []const u8, startup: bool) !bool {
+    var matches = false;
+    for (r.config.dns_servers) |server| {
+        const answer = dnsLookup(server, hostname, r.config.domain, ip) catch |err| {
+            if (startup) common.log(.ERROR, "DNS validation failed: server={s} host={s} error={t}", .{ server, hostname, err }) else common.log(.WARN, "DNS lookup failed before update: server={s} host={s} error={t}", .{ server, hostname, err });
+            continue;
+        };
+        if (answer.addresses > 1) common.log(.WARN, "DNS validation found multiple A records: server={s} host={s} count={d}", .{ server, hostname, answer.addresses });
+        if (!answer.matches and startup) common.log(.ERROR, "DNS validation mismatch: server={s} host={s} expected_ip={s}", .{ server, hostname, ip });
+        matches = matches or answer.matches;
+    }
+    return matches;
+}
+fn validateDnsState(r: *Runtime) void {
+    if (r.config.dns_servers.len == 0) return common.log(.WARN, "DNS validation skipped: dns_servers is empty", .{});
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(r.db, "SELECT hostname,ip_address FROM desired_overrides WHERE present=1", -1, &stmt, null) != c.SQLITE_OK) return common.log(.ERROR, "DNS validation could not read SQLite desired state", .{});
+    defer _ = c.sqlite3_finalize(stmt);
+    while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+        const hostname = std.mem.span(c.sqlite3_column_text(stmt, 0));
+        const ip = std.mem.span(c.sqlite3_column_text(stmt, 1));
+        const matches = validateDnsRecord(r, hostname, ip, true) catch false;
+        if (!matches) {
+            queueDesired(r.db, hostname) catch |err| {
+                common.log(.ERROR, "DNS validation could not queue update: host={s} error={t}", .{ hostname, err });
+                continue;
+            };
+            common.log(.INFO, "DNS validation queued OPNsense update: host={s} ip={s}", .{ hostname, ip });
+        }
+    }
+}
 fn serviceTimers(r: *Runtime, allocator: std.mem.Allocator) void {
     expireDesired(r) catch |err| common.log(.ERROR, "TTL cleanup failed: {t}", .{err});
     const due_work = nextDesired(r.db, allocator, nowSeconds()) catch |err| {
@@ -263,6 +438,15 @@ fn serviceTimers(r: *Runtime, allocator: std.mem.Allocator) void {
         r.reconfigure_due = null;
     };
     if (now >= r.health_due) healthCheck(r, allocator, false);
+}
+fn forceResync(r: *Runtime, allocator: std.mem.Allocator) void {
+    common.log(.INFO, "SIGUSR2 requested SQLite-to-OPNsense resync", .{});
+    reconcile(r, allocator) catch |err| {
+        common.log(.WARN, "requested OPNsense resync failed: {t}", .{err});
+        return;
+    };
+    r.reconcile_due = nowSeconds() + r.config.reconcile_seconds;
+    common.log(.INFO, "requested SQLite-to-OPNsense resync queued durable records", .{});
 }
 fn requestReconfigure(r: *Runtime) void {
     const due = nowSeconds() + @max(@as(i64, 0), r.config.throttle_seconds);
@@ -395,6 +579,11 @@ fn processDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !
     if (desired.present) try applyDesired(r, allocator, desired) else try removeDesired(r, allocator, desired);
 }
 fn applyDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !void {
+    if (r.config.dns_servers.len > 0 and try validateDnsRecord(r, desired.hostname, desired.ip, false)) {
+        common.log(.INFO, "lease update redundant: DNS already resolves host={s} ip={s}", .{ desired.hostname, desired.ip });
+        try markClean(r.db, desired.hostname);
+        return;
+    }
     var body: std.Io.Writer.Allocating = .init(allocator);
     defer body.deinit();
     try body.writer.writeAll("{\"host\":{\"enabled\":\"1\",\"hostname\":\"");
@@ -432,6 +621,20 @@ fn markApplied(db: *c.sqlite3, hostname: []const u8, uuid: []const u8) !void {
     defer _ = c.sqlite3_finalize(stmt);
     _ = c.sqlite3_bind_text(stmt, 1, uuid.ptr, @intCast(uuid.len), c.SQLITE_TRANSIENT);
     _ = c.sqlite3_bind_text(stmt, 2, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
+}
+fn markClean(db: *c.sqlite3, hostname: []const u8) !void {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET dirty=0,failures=0 WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
+    defer _ = c.sqlite3_finalize(stmt);
+    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
+}
+fn queueDesired(db: *c.sqlite3, hostname: []const u8) !void {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET dirty=1,next_attempt=0,failures=0 WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
+    defer _ = c.sqlite3_finalize(stmt);
+    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn scheduleRetry(db: *c.sqlite3, hostname: []const u8) !void {

@@ -72,8 +72,8 @@ def main() -> int:
         check(dhcp4.get(key) is True, f"{key} is true")
     check(dhcp4.get("hostname-char-set") == "[^A-Za-z0-9.-]", "hostname-char-set permits letters, digits, dots, and hyphens")
 
-    hooks = dhcp4.get("hook-libraries")
-    check(isinstance(hooks, list), "hook-libraries is an array")
+    hooks = dhcp4.get("hooks-libraries")
+    check(isinstance(hooks, list), "hooks-libraries is an array")
     matches = [
         hook for hook in hooks
         if isinstance(hook, dict) and hook.get("library") == "/usr/lib/kea/hooks/libdhcp_run_script.so"
@@ -83,7 +83,7 @@ def main() -> int:
         params = matches[0].get("parameters")
         check(isinstance(params, dict), "run-script hook has a parameters object")
         if isinstance(params, dict):
-            check(params.get("name") == str(HOOK_EXECUTABLE), f"run-script hook name is {HOOK_EXECUTABLE}")
+            check(params.get("name") == str(HOOK_EXECUTABLE), f"run-script parameters.name is {HOOK_EXECUTABLE}")
             check(params.get("sync") is False, "run-script hook sync is false")
 
     check(HOOK_EXECUTABLE.is_file(), f"hook executable exists at {HOOK_EXECUTABLE}")
@@ -98,7 +98,7 @@ def main() -> int:
         check(isinstance(timeout, int) and not isinstance(timeout, bool) and 1 <= timeout <= 3600, "hook timeout_seconds is an integer from 1 to 3600")
         check(isinstance(loglevel, str) and loglevel in LOG_LEVELS, "hook loglevel is ERROR, WARN, INFO, or DEBUG")
 
-    print("Hook captures: KEA_LEASE4_ADDRESS, KEA_LEASE4_HWADDR, KEA_LEASE4_HOSTNAME, KEA_LEASE4_VALID_LIFETIME, KEA_LEASE4_SUBNET_ID, KEA_QUERY4_INTERFACE.")
+    print("Hook captures: LEASE4_ADDRESS, LEASE4_HWADDR, LEASE4_HOSTNAME, LEASE4_VALID_LIFETIME, LEASE4_SUBNET_ID, QUERY4_IFACE_NAME.")
     print(f"Summary: {failures} failure(s).")
     return 1 if failures else 0
 

@@ -1,6 +1,6 @@
 # AGENTS
 
-`leaselinkd` is an event-driven Kea DHCPv4 → OPNsense Unbound bridge, currently version `2.0.1`. It uses a lightweight **agent** model: each executable has one responsibility.
+`leaselinkd` is an event-driven Kea DHCPv4 → OPNsense Unbound bridge, currently version `2.1.0`. It uses a lightweight **agent** model: each executable has one responsibility.
 
 1. **leaselinkd** – Persistent systemd daemon. It receives lease events, serializes OPNsense API operations, stores hostname-to-override UUID mappings in SQLite, defers reconfiguration, and health-checks OPNsense.
 2. **kea-leaselink** – One-shot Kea `libdhcp_run_script.so` target. It converts the hook point and Kea environment variables to JSON, forwards one event, and exits.
@@ -14,6 +14,7 @@ Both agents share a *Memory* profile described in [MEMORY.md](./MEMORY.md). They
 - **Lease actions** – release, expiry, decline, and recovery delete an override; other valid IPv4 lease events add or update one.
 - **OPNsense API** – Native Zig `std.http.Client` with HTTP Basic authentication; no `curl` subprocess. HTTPS verifies against the host trust store.
 - **Reconfigure and health** – Reconfigure calls are coalesced by `throttle_seconds`. Health checks call `GET /api/unbound/service/status` at startup and on the configured interval, with capped exponential retry after failure.
+- **DNS validation** – `dns_servers` configures one or more IPv4 UDP resolvers. Before an update, an existing matching A record is logged as redundant; startup validates every desired record, reporting errors for missing or mismatched records and warnings for multiple A records.
 
 ### Service account and operations
 
@@ -24,6 +25,7 @@ Both agents share a *Memory* profile described in [MEMORY.md](./MEMORY.md). They
 - Both binaries support `--loglevel ERROR|WARN|INFO|DEBUG`; avoid logging keys or secrets. Manager startup INFO logs include its version, architecture, safe configuration, and firewall health summary. DEBUG includes payloads, API paths, periodic health checks, and scheduler activity.
 - `leaselinkd --config-check` validates parsed config, secrets, timer/listener values, and SQLite ledger access without opening a listener. `leaselinkd --api-test` performs an OPNsense status request and deliberately invokes Unbound reconfigure with a hard 60-second process deadline (exit status `124` on timeout).
 - `SIGUSR1` requests a manager configuration and metrics snapshot: `systemctl kill -s USR1 leaselinkd.service`. Metrics include runtime, lease events, API calls/failures, health checks/failures, and reconfigures.
+- `SIGUSR2` requests an immediate SQLite-to-OPNsense resync: `systemctl kill -s USR2 leaselinkd.service`. The manager reconciles owned remote overrides and queues durable desired records for reapplication.
 
 ### Build & Deployment
 
@@ -35,4 +37,7 @@ Update [CHANGELOG.md](./CHANGELOG.md) whenever implementation, packaging, runtim
 
 ---
 
-PostgreSQL/cron reconciliation fields are retained in example configuration for planned future work; they are not implemented by the current manager. See [MEMORY.md](./MEMORY.md) for resource, persistence, monitoring, and security guidance.
+`leaselinkd` does not connect to PostgreSQL or use cron-scheduling
+configuration. The separate `keadb-leaselinkd-sync` utility can import active Kea
+PostgreSQL leases when explicitly invoked. See [MEMORY.md](./MEMORY.md) for
+resource, persistence, monitoring, and security guidance.

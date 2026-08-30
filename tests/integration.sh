@@ -28,6 +28,7 @@ cat > "$tmp/hook.json" <<EOF
 EOF
 "$manager" --config "$tmp/config.json" --secret "$tmp/secrets.json" --config-check >"$tmp/config-check.log" 2>&1
 grep -q 'configuration check passed' "$tmp/config-check.log"
+test ! -e "$tmp/ledger.sqlite"
 "$manager" --help >"$tmp/manager-help.log"
 grep -q '^ Usage: leaselinkd \[OPTIONS\]' "$tmp/manager-help.log"
 grep -q -- '--config <PATH>' "$tmp/manager-help.log"
@@ -60,7 +61,7 @@ LEASELINKD_CONFIG="$tmp/config.json" LEASELINKD_SECRETS="$tmp/secrets.json" "$ma
 manager_pid=$!
 for _ in $(seq 1 50); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 [ -S "$tmp/unbound.sock" ]
-grep -q 'leaselinkd v2.0.1 starting; architecture=' "$tmp/manager.log"
+grep -q 'leaselinkd v2.1.0 starting; architecture=' "$tmp/manager.log"
 grep -q 'config: api=' "$tmp/manager.log"
 grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
 
@@ -102,6 +103,12 @@ sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='b
 if KEA_LEASELINK_CONFIG="$tmp/hook.json" KEA_LEASE4_HOSTNAME=loopback KEA_LEASE4_ADDRESS=127.0.0.1 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --loglevel DEBUG lease4_committed >"$tmp/loopback.log" 2>&1; then exit 1; fi
 grep -q 'invalid or loopback IPv4 lease address' "$tmp/loopback.log"
 test "$(grep -c 'settings/add_host_override' "$tmp/opnsense.log")" -eq 35
+resync_searches=$(grep -c 'GET /api/unbound/settings/search_host_override' "$tmp/opnsense.log" || true)
+kill -USR2 "$manager_pid"
+for _ in $(seq 1 30); do grep -q 'SIGUSR2 requested SQLite-to-OPNsense resync' "$tmp/manager.log" && break; sleep 0.1; done
+grep -q 'SIGUSR2 requested SQLite-to-OPNsense resync' "$tmp/manager.log"
+for _ in $(seq 1 30); do test "$(grep -c 'GET /api/unbound/settings/search_host_override' "$tmp/opnsense.log" || true)" -gt "$resync_searches" && break; sleep 0.1; done
+test "$(grep -c 'GET /api/unbound/settings/search_host_override' "$tmp/opnsense.log" || true)" -gt "$resync_searches"
 kill -USR1 "$manager_pid"
 for _ in $(seq 1 30); do grep -q 'metrics: runtime=' "$tmp/manager.log" && break; sleep 0.1; done
 grep -q 'metrics: runtime=' "$tmp/manager.log"

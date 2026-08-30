@@ -4,7 +4,7 @@
 if (PHP_SAPI !== 'cli' || posix_geteuid() !== 0) { fwrite(STDERR, "Run as root on OPNsense.\n"); exit(1); }
 require_once('/usr/local/etc/inc/config.inc');
 require_once('/usr/local/etc/inc/auth.inc');
-const VERSION='2.0.1'; const GROUP_NAME='unbound_api'; const USER_NAME='leaselinkd'; const BOOTSTRAP_FILE='/root/leaselinkd-bootstrap.json';
+const VERSION='2.1.0'; const GROUP_NAME='unbound_api'; const USER_NAME='leaselinkd'; const BOOTSTRAP_FILE='/root/leaselinkd-bootstrap.json';
 $privileges=['page-diagnostics-health','page-services-unbound','page-services-dnsresolver-acls','page-services-dnsresolver-advanced','page-services-dnsresolver-overrides','page-services-dnsresolver','page-system-status'];
 printf("OPNsense leaselinkd provisioner v%s starting.\n", VERSION);
 

@@ -1,8 +1,8 @@
 # Configuration reference
 
 `leaselinkd` and `kea-leaselink` read separate JSON files. Unknown fields are
-ignored for forward compatibility; the PostgreSQL and cron fields found in
-older examples are not implemented.
+ignored for forward compatibility. The manager does not use PostgreSQL
+connection or cron-scheduling fields.
 
 ## `/etc/leaselinkd/config.json`
 
@@ -20,6 +20,7 @@ older examples are not implemented.
   "socket_path": "/run/leaselinkd/fifo.pipe",
   "tcp_host": "127.0.0.1",
   "tcp_port": 9080,
+  "dns_servers": ["10.0.0.1:53", "10.0.0.2:53"],
   "throttle_seconds": 10,
   "health_check_seconds": 60,
   "initial_backoff_ms": 100,
@@ -33,6 +34,10 @@ older examples are not implemented.
 includes `/api/unbound` exactly once. For HTTPS, use a DNS hostname covered by
 a `DNS:` SAN on the firewall Web GUI certificate. `listen_type` is `unix` by
 default; set it to `tcp` only when using the local TCP listener.
+
+`dns_servers` lists IPv4 UDP resolver endpoints used to validate A records.
+Each endpoint is `ADDRESS` or `ADDRESS:PORT`; port `53` is used when omitted.
+An empty list disables DNS validation for backward-compatible deployments.
 
 All timeout values are seconds and must be between 1 and 3600. The manager
 retries failed health checks with exponential backoff beginning at
