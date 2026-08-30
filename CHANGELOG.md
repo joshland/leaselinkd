@@ -10,6 +10,8 @@ All notable development work is documented here. This project follows semantic v
 - Expanded `check-kea-config.py` to report the status of required Kea DHCPv4
   keys, run-script parameters, installed hook executable, and hook transport
   configuration values.
+- Corrected the architecture reference to document Kea's unprefixed
+  `LEASE4_*` and `LEASES4_*` hook environment variables.
 - Established `leaselinkd` as the daemon and public operational identity,
   including its executable, service account,
   systemd unit, configuration and state paths, Unix socket, environment
@@ -157,7 +159,7 @@ All notable development work is documented here. This project follows semantic v
 - Added an `leaselinkd` system user and group through `sysusers.d`.
 - Changed `leaselinkd.service` to run as `leaselinkd:leaselinkd` with systemd hardening settings.
 - Added systemd-managed runtime and state directories owned by the service account.
-- Added tmpfiles policy for `/etc/leaselinkd`, `/etc/kea-dns-mgr`, `/run/leaselinkd`, and `/var/lib/leaselinkd`, including configuration and secret file modes.
+- Added tmpfiles policy for `/etc/leaselinkd`, `/run/leaselinkd`, and `/var/lib/leaselinkd`, including configuration and secret file modes.
 - Kept the non-secret Kea hook configuration world-readable (`0644`) so an installed `kea` service account can read its manager address without access to OPNsense secrets.
 - Changed the Unix socket to mode `0660` so Kea can connect through membership in the `leaselinkd` group.
 - Kept API secrets root-only and passed them to the service with systemd `LoadCredential`.

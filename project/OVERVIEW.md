@@ -1,6 +1,6 @@
 # Overview
 
-The `KEA‑DNS‑MGR` project provides a **dhcp4 → dns** bridge for an environment that runs both the **Kea DHCP server** and **OPNsense Unbound DNS**.  All code lives under the repository root `/home/joshua/_git/lease-management`.
+The `leaselinkd` project provides a **dhcp4 → dns** bridge for an environment that runs both the **Kea DHCP server** and **OPNsense Unbound DNS**. All code lives under the repository root `/home/joshua/_git/leaselinkd`.
 
 * **Runtime components**
   * `leaselinkd` – Zig HTTP service (systemd unit) that accepts lease events, talks to Unbound over its API and can do scheduled reconciliation with Kea’s PostgreSQL lease table.

@@ -11,7 +11,7 @@ project directory: ./  (~/_git/lease-management/)
 
 config files:
 - /etc/leaselinkd/hook.json
-- /etc/kea-dns-mgr/secrets.json 
+- /etc/leaselinkd/secrets.json
 
 dhcp server:
 Model name:                              AMD Ryzen 5 8500G w/ Radeon 740M Graphics

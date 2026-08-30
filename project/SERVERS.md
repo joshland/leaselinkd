@@ -13,4 +13,4 @@ The solution involves two logical servers residing on the same host:
      * Performs health‑checks every `health_check_seconds`.
      * On success schedules a reconciliation on system boot and at times specified by the cron expression in the configuration.
 
-Both servers are installed via the single AUR package `kea-dns-mgr`. Systemd units (`leaselinkd.service` and `kea-dns-hook.service`) handle start/stop/restart.
+Both components are installed via the single AUR package `leaselinkd`. The `leaselinkd.service` systemd unit handles the manager lifecycle; Kea invokes `kea-leaselink` for each lease event.
