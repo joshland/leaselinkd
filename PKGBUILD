@@ -2,7 +2,7 @@
 # URL: https://github.com/joshland/leaselinkd
 pkgname=leaselinkd
 pkgver=2.1.0
-pkgrel=5
+pkgrel=7
 install=leaselinkd.install
 arch=('x86_64')
 url="https://github.com/joshland/leaselinkd"

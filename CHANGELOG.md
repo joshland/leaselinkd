@@ -13,6 +13,7 @@ All notable development work is documented here. This project follows semantic v
   startup validation.
 - Fixed the integration test to wait for the daemon's asynchronous first lease
   event to reach SQLite before asserting its ledger entry.
+- Include the full queried domain name in DNS lookup failure logs.
 - Restart an already-running `leaselinkd.service` after package upgrades
   without enabling or starting an inactive service.
 - Reload the systemd manager after package installation and upgrades before

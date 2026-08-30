@@ -379,9 +379,11 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
 }
 fn validateDnsRecord(r: *Runtime, hostname: []const u8, ip: []const u8, startup: bool) !bool {
     var matches = false;
+    var fullname_buffer: [255]u8 = undefined;
+    const fullname = std.fmt.bufPrint(&fullname_buffer, "{s}.{s}", .{ hostname, r.config.domain }) catch hostname;
     for (r.config.dns_servers) |server| {
         const answer = dnsLookup(server, hostname, r.config.domain, ip) catch |err| {
-            if (startup) common.log(.ERROR, "DNS validation failed: server={s} host={s} error={t}", .{ server, hostname, err }) else common.log(.WARN, "DNS lookup failed before update: server={s} host={s} error={t}", .{ server, hostname, err });
+            if (startup) common.log(.ERROR, "DNS validation failed: server={s} host={s} fqdn={s} error={t}", .{ server, hostname, fullname, err }) else common.log(.WARN, "DNS lookup failed before update: server={s} host={s} fqdn={s} error={t}", .{ server, hostname, fullname, err });
             continue;
         };
         if (answer.addresses > 1) common.log(.WARN, "DNS validation found multiple A records: server={s} host={s} count={d}", .{ server, hostname, answer.addresses });
