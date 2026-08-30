@@ -1,5 +1,0 @@
-{
-  "leaselinkd_address": "unix:///run/leaselinkd/fifo.pipe",
-  "timeout_seconds": 2,
-  "loglevel": "INFO"
-}

@@ -6,7 +6,7 @@ The system operates through the following processes:
 |-----|-----------|------|
 | 1   | `kea`    | DHCP service, triggers hook.
 | 2   | `leaselinkd` | HTTP server handling `/lease_event`, CRUD with OPNsense and performing scheduled reconciliation.
-| 3   | `kea‑hook` (spawned) | For each lease event, this temporary process builds the JSON payload and posts to `leaselinkd`; exits immediately. Its exit status is ignored by Kea.
+| 3   | `kea-leaselink` (spawned) | For each lease event, this temporary process builds the JSON payload and posts to `leaselinkd`; exits immediately. Its exit status is ignored by Kea.
 
 ### Workflow Example
 1. **Lease Assigned** – Kea receives a DHCP request, writes the lease database entry, then executes `/usr/share/kea/scripts/kea-leaselink lease4_committed` with environment variables set as per `kea-notes.md`.
@@ -14,7 +14,7 @@ The system operates through the following processes:
    ```json
    {"event":"lease4_committed","timestamp":...,"lease":{"hostname":"client1","ip-address":"192.168.1.10","mac-address":"00:11:22:33:44:55"}}
    ```
-   and POSTs to `unbound‑mgr/lease_event`.
+   and POSTs to `leaselinkd` at `/lease_event`.
 3. **Server Processing** – The manager queues the event, calls `add_or_update_override`, stores UUID in SQLite, and throttles a reconfigure call if allowed.
 4. **Periodic Reconcile** – Every 5 minutes (or as configured) the server reads all active Leases from PostgreSQL, diff against SQLite + Unbound’s known overrides, performs necessary adds / updates / deletes, then performs a throttled `reconfigure`.
 

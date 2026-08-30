@@ -20,7 +20,7 @@ Both agents share a *Memory* profile described in [MEMORY.md](./MEMORY.md). They
 - The package creates `leaselinkd` user/group. The systemd service runs as this unprivileged account and owns `/run/leaselinkd` and `/var/lib/leaselinkd`.
 - The Unix socket is mode `0660`; Kea's service account must be a member of `leaselinkd`.
 - `/etc/leaselinkd/secrets.json` stays root-readable only and is passed to the service through systemd `LoadCredential`.
-- `/etc/kea-dns-mgr/config.json` contains only the manager transport address and is intentionally `root:root` mode `0644`, so the `kea` user can always read the hook configuration without receiving secret access.
+- `/etc/leaselinkd/hook.json` contains only the manager transport address and is `root:leaselinkd` mode `0640`, so the `kea` user can read it through its `leaselinkd` group membership without receiving secret access.
 - Both binaries support `--loglevel ERROR|WARN|INFO|DEBUG`; avoid logging keys or secrets. Manager startup INFO logs include its version, architecture, safe configuration, and firewall health summary. DEBUG includes payloads, API paths, periodic health checks, and scheduler activity.
 - `leaselinkd --config-check` validates parsed config, secrets, timer/listener values, and SQLite ledger access without opening a listener. `leaselinkd --api-test` performs an OPNsense status request and deliberately invokes Unbound reconfigure with a hard 60-second process deadline (exit status `124` on timeout).
 - `SIGUSR1` requests a manager configuration and metrics snapshot: `systemctl kill -s USR1 leaselinkd.service`. Metrics include runtime, lease events, API calls/failures, health checks/failures, and reconfigures.

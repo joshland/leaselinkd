@@ -3,7 +3,7 @@
   leaselinkd should report configuration if it recived SIGUSR1
   leaselinkd should report some basic metrics if it recived SIGUSR1 (call count, runtime, api call counts)
 
-  1. add --loglevel flag that takes ERROR, WARN, INFO or DEBUG for leaselinkd and kea-hooks
+  1. add --loglevel flag that takes ERROR, WARN, INFO or DEBUG for leaselinkd and `kea-leaselink`
   2. DEBUG this should log important configuration on startup, and emit key messages during operations. Enough to debug config,
   startup, payloads, and any triggers.
   3. ERROR should log any error or failure condition

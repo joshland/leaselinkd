@@ -32,11 +32,11 @@ The package installs:
 | `/usr/share/leaselinkd/fetch-firewall-certificate.sh` | Fetch the firewall-presented CA certificate without trusting it |
 | `/usr/share/leaselinkd/trust-firewall-certificate.sh` | Install a trusted firewall CA into Arch's system trust store |
 | `/usr/share/leaselinkd/check-firewall-certificate.sh` | Diagnose firewall certificate identity, extensions, and trust-chain failures |
-| `/usr/share/leaselinkd/check-kea-config.py` | Validate Kea DDNS and run-script hook settings |
+| `/usr/share/leaselinkd/check-kea-config.py` | Validate Kea DDNS, run-script settings, and hook transport configuration |
 | `/usr/share/leaselinkd/leaselinkd-sync` | One-shot import of active Kea PostgreSQL leases |
 | `/etc/leaselinkd/config.json` | Non-secret manager settings |
 | `/etc/leaselinkd/secrets.json` | OPNsense credentials |
-| `/etc/kea-dns-mgr/config.json` | Hook transport setting |
+| `/etc/leaselinkd/hook.json` | Hook transport setting |
 
 ## Configuration
 
@@ -98,7 +98,7 @@ sudo /usr/share/leaselinkd/leaselinkd-sync
 When no database options are supplied, the importer reads PostgreSQL connection
 details from `Dhcp4.lease-database` in `/etc/kea/kea-dhcp4.conf`; run it as a
 user permitted to read that file. It reads the manager address from
-`/etc/kea-dns-mgr/config.json`. It supports explicit credentials when that is
+`/etc/leaselinkd/hook.json`. It supports explicit credentials when that is
 more appropriate, including a password file to avoid command-history exposure:
 
 ```sh
@@ -134,7 +134,7 @@ The `usermod` command is only needed to repair an existing installation whose
 package upgrade has not yet applied the sysusers policy. Confirm with
 `id kea`; its groups must include `leaselinkd`.
 
-`/etc/kea-dns-mgr/config.json` is deliberately `root:root` mode `0644`: it contains only the manager address and is readable by the `kea` user. `secrets.json` remains root-readable only. The systemd unit passes it to `leaselinkd` using `LoadCredential`, so do not relax its file mode.
+`/etc/leaselinkd/hook.json` is deliberately `root:leaselinkd` mode `0640`: it contains only the manager address and is readable by the `kea` user through its `leaselinkd` group membership. `secrets.json` remains root-readable only. The systemd unit passes it to `leaselinkd` using `LoadCredential`, so do not relax its file mode.
 
 The package's tmpfiles policy enforces these ownership and mode expectations on the configuration directories, runtime directory, and state directory. To apply them immediately after a manual permission change, run:
 
@@ -185,7 +185,7 @@ Credentials are never logged.
 For one-off testing, `--config PATH` overrides either program's normal
 configuration file. `leaselinkd --secret PATH` likewise overrides its normal
 secrets file; these command-line paths take precedence over the legacy
-`LEASELINKD_CONFIG`, `LEASELINKD_SECRETS`, and `KEA_DNS_MGR_CONFIG`
+`LEASELINKD_CONFIG`, `LEASELINKD_SECRETS`, and `KEA_LEASELINK_CONFIG`
 environment overrides. This permits a non-production test without changing
 `/etc`:
 
@@ -214,7 +214,7 @@ Validate the Kea DHCPv4 DDNS settings and the one relevant entry among its
 possibly multiple hook libraries:
 
 ```sh
-python3 /usr/share/leaselinkd/check-kea-config.py /etc/kea/kea-dhcp4.conf
+python3 /usr/share/leaselinkd/check-kea-config.py /etc/kea/kea-dhcp4.conf /etc/leaselinkd/hook.json
 ```
 
 Validate OPNsense reachability and deliberately trigger an Unbound reconfigure:

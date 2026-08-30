@@ -99,7 +99,7 @@ grep -q 'hostname-less lease4_renew deferred' "$tmp/hostname-less-renew.log"
 LEASES4_SIZE=1 LEASES4_AT0_HOSTNAME=batchhost LEASES4_AT0_ADDRESS=192.0.2.70 LEASES4_AT0_HWADDR=00:11:22:33:44:77 LEASES4_AT0_VALID_LIFETIME=3600 "$hook" --config "$tmp/hook.json" leases4_committed
 for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='batchhost'" | grep -qx 192.0.2.70 && break; sleep 0.05; done
 sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='batchhost'" | grep -qx 192.0.2.70
-if KEA_DNS_MGR_CONFIG="$tmp/hook.json" KEA_LEASE4_HOSTNAME=loopback KEA_LEASE4_ADDRESS=127.0.0.1 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --loglevel DEBUG lease4_committed >"$tmp/loopback.log" 2>&1; then exit 1; fi
+if KEA_LEASELINK_CONFIG="$tmp/hook.json" KEA_LEASE4_HOSTNAME=loopback KEA_LEASE4_ADDRESS=127.0.0.1 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --loglevel DEBUG lease4_committed >"$tmp/loopback.log" 2>&1; then exit 1; fi
 grep -q 'invalid or loopback IPv4 lease address' "$tmp/loopback.log"
 test "$(grep -c 'settings/add_host_override' "$tmp/opnsense.log")" -eq 35
 kill -USR1 "$manager_pid"

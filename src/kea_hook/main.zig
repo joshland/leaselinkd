@@ -200,18 +200,18 @@ fn printHelp(init: std.process.Init) !void {
         \\  EVENT                     Kea event name, for example lease4_committed.
         \\
         \\Options:
-        \\  --config <PATH>         Override /etc/kea-dns-mgr/config.json.
+        \\  --config <PATH>         Override /etc/leaselinkd/hook.json.
         \\  --loglevel <LEVEL>        Logging level: ERROR, WARN, INFO, or DEBUG. [default: INFO]
         \\  -h, --help                Show this message and exit.
         \\
         \\Lease values are read from KEA_LEASE4_HOSTNAME, KEA_LEASE4_ADDRESS, and
-        \\KEA_LEASE4_HWADDR. Transport configuration is read from /etc/kea-dns-mgr/config.json.
+        \\KEA_LEASE4_HWADDR. Transport configuration is read from /etc/leaselinkd/hook.json.
         \\
     );
     try output.interface.flush();
 }
 fn loadConfig(init: std.process.Init, allocator: std.mem.Allocator, config_path: ?[]const u8) !HookConfig {
-    const path = config_path orelse init.minimal.environ.getPosix("KEA_DNS_MGR_CONFIG") orelse "/etc/kea-dns-mgr/config.json";
+    const path = config_path orelse init.minimal.environ.getPosix("KEA_LEASELINK_CONFIG") orelse "/etc/leaselinkd/hook.json";
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, allocator, .limited(64 * 1024));
     return try std.json.parseFromSliceLeaky(HookConfig, allocator, bytes, .{ .ignore_unknown_fields = true });
 }

@@ -6,7 +6,7 @@ The solution involves two logical servers residing on the same host:
    * Uses the built‑in `libdhcp_run_script.so` hook.
    * When a lease is committed, released or expired Kea sets environment variables (see kea‑notes.md) and then runs the script `/usr/share/kea/scripts/kea-leaselink`. The script receives the event type as `$1`.
 
-2. **unbound‑mgr Service**
+2. **leaselinkd Service**
    * A Zig application compiled to a single binary `leaselinkd`.
    * Listens on an AF_UNIX socket at `/run/leaselinkd/fifo.pipe` (default). TCP mode can be switched by editing the config (`listen_type="tcp"`).
    * Starts a background goroutine that:

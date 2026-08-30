@@ -56,7 +56,7 @@ This file is root-readable only. Do not place credentials in `config.json`,
 logs, shell history, or source control. The legacy aliases `apik_key` and
 `apikey_secret` are accepted for compatibility.
 
-## `/etc/kea-dns-mgr/config.json`
+## `/etc/leaselinkd/hook.json`
 
 ```json
 {
@@ -78,4 +78,4 @@ Both configuration files accept `ERROR`, `WARN`, `INFO`, or `DEBUG` for
 For one-off tests, `leaselinkd --config PATH --secret PATH` overrides its
 normal files, and `kea-leaselink --config PATH` overrides its hook file. The
 legacy environment overrides remain supported: `LEASELINKD_CONFIG`,
-`LEASELINKD_SECRETS`, and `KEA_DNS_MGR_CONFIG`.
+`LEASELINKD_SECRETS`, and `KEA_LEASELINK_CONFIG`.

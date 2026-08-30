@@ -11,7 +11,7 @@ makedepends=('zig')
 checkdepends=('python')
 backup=('etc/leaselinkd/config.json'
         'etc/leaselinkd/secrets.json'
-        'etc/kea-dns-mgr/config.json')
+        'etc/leaselinkd/hook.json')
 build() {
     cd "$startdir"
     zig build -Doptimize=ReleaseSmall
@@ -31,7 +31,7 @@ package() {
     install -Dm755 "$startdir/packaging/provision-opnsense-leaselinkd.php" "$pkgdir/usr/share/leaselinkd/provision-opnsense-leaselinkd.php"
     install -Dm644 "$startdir/examples/config.json" "$pkgdir/etc/leaselinkd/config.json"
     install -Dm600 "$startdir/examples/secrets.json" "$pkgdir/etc/leaselinkd/secrets.json"
-    install -Dm644 "$startdir/examples/kea-hook-config.json" "$pkgdir/etc/kea-dns-mgr/config.json"
+    install -Dm640 "$startdir/examples/hook.json" "$pkgdir/etc/leaselinkd/hook.json"
     install -Dm644 "$startdir/packaging/leaselinkd.service" "$pkgdir/usr/lib/systemd/system/leaselinkd.service"
     install -Dm644 "$startdir/packaging/leaselinkd.tmpfiles" "$pkgdir/usr/lib/tmpfiles.d/leaselinkd.conf"
     install -Dm644 "$startdir/packaging/leaselinkd.sysusers" "$pkgdir/usr/lib/sysusers.d/leaselinkd.conf"

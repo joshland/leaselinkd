@@ -21,7 +21,7 @@ import typer
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 DEFAULT_KEA_CONFIG = Path("/etc/kea/kea-dhcp4.conf")
-DEFAULT_HOOK_CONFIG = Path("/etc/kea-dns-mgr/config.json")
+DEFAULT_HOOK_CONFIG = Path("/etc/leaselinkd/hook.json")
 HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 

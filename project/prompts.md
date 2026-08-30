@@ -24,7 +24,7 @@ Chronological record of the user requests that guided this project.
 
 ## 2. Test coverage
 
-> can you make some tests, and test at least the kea-hook and the leaselinkd
+> can you make some tests, and test at least `kea-leaselink` and `leaselinkd`
 
 ## 3. Manager runtime features
 
@@ -46,7 +46,7 @@ Chronological record of the user requests that guided this project.
 > leaselinkd should report configuration if it recived SIGUSR1
 > leaselinkd should report some basic metrics if it recived SIGUSR1 (call count, runtime, api call counts)
 >
-> 1. add --loglevel flag that takes ERROR, WARN, INFO or DEBUG for leaselinkd and kea-hooks
+> 1. add --loglevel flag that takes ERROR, WARN, INFO or DEBUG for leaselinkd and `kea-leaselink`
 > 2. DEBUG this should log important configuration on startup, and emit key messages during operations. Enough to debug config, startup, payloads, and any triggers.
 > 3. ERROR should log any error or failure condition
 > 4. WARN should log any incomplete/irregular or insufficient information to proceed.
@@ -88,7 +88,7 @@ Chronological record of the user requests that guided this project.
 >
 > add writing the changelog to either AGENTS or MEMORY
 
-## 14. Kea hook configuration access
+## 14. `kea-leaselink` configuration access
 
 > if kea installed on the node we install on, we should ensure that the kea user can read the hook config.
 

@@ -10,7 +10,7 @@ goals:
 project directory: ./  (~/_git/lease-management/)
 
 config files:
-- /etc/kea-dns-mgr/config.json
+- /etc/leaselinkd/hook.json
 - /etc/kea-dns-mgr/secrets.json 
 
 dhcp server:
