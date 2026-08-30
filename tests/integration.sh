@@ -68,6 +68,7 @@ grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
 KEA_LEASE4_HOSTNAME=printer KEA_LEASE4_ADDRESS=192.0.2.50 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --config "$tmp/hook.json" --loglevel DEBUG lease4_committed >"$tmp/hook-add.log" 2>&1
 grep -q 'lease operation complete: event=lease4_committed manager_api=passed' "$tmp/hook-add.log"
 for _ in $(seq 1 50); do [ -f "$tmp/opnsense.log" ] && break; sleep 0.05; done
+for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT hostname || ':' || uuid || ':' || ip_address FROM overrides" | grep -qx 'printer:override-uuid:192.0.2.50' && break; sleep 0.05; done
 sqlite3 "$tmp/ledger.sqlite" "SELECT hostname || ':' || uuid || ':' || ip_address FROM overrides" | grep -qx 'printer:override-uuid:192.0.2.50'
 grep -q 'POST /api/unbound/settings/add_host_override Basic a2V5OnNlY3JldA==' "$tmp/opnsense.log"
 for _ in $(seq 1 30); do test "$(grep -c 'service/reconfigure' "$tmp/opnsense.log")" -eq 1 && break; sleep 0.1; done

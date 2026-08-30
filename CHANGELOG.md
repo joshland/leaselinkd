@@ -11,6 +11,8 @@ All notable development work is documented here. This project follows semantic v
   multiple-record logging.
 - Queue missing or mismatched DNS records for immediate OPNsense update during
   startup validation.
+- Fixed the integration test to wait for the daemon's asynchronous first lease
+  event to reach SQLite before asserting its ledger entry.
 - Restart an already-running `leaselinkd.service` after package upgrades
   without enabling or starting an inactive service.
 - Reload the systemd manager after package installation and upgrades before
