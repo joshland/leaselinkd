@@ -4,6 +4,8 @@ All notable development work is documented here. This project follows semantic v
 
 ## 2.1.0 — Operational resynchronization
 
+- Package the README and operational documentation under
+  `/usr/share/doc/leaselinkd-<version>`.
 - Added `SIGUSR2` to request an immediate SQLite-to-OPNsense resync through
   the daemon's serialized reconciliation path.
 - Added `dns_servers` for native UDP A-record validation before updates and

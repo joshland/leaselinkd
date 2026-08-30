@@ -23,6 +23,15 @@ check() {
 }
 package() {
     install -d -m750 "$pkgdir/etc/leaselinkd"
+    install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/README.md"
+    install -Dm644 "$startdir/project/ARCHITECTURE.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/ARCHITECTURE.md"
+    install -Dm644 "$startdir/project/CONFIGS.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/CONFIGS.md"
+    install -Dm644 "$startdir/project/OPNsense_Manual_Provisioning.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/OPNsense_Manual_Provisioning.md"
+    install -Dm644 "$startdir/project/OPNsense_Unbound_HOWTO.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/OPNsense_Unbound_HOWTO.md"
+    install -Dm644 "$startdir/project/OPNsense_Unbound.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/OPNsense_Unbound.md"
+    install -Dm644 "$startdir/project/OVERVIEW.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/OVERVIEW.md"
+    install -Dm644 "$startdir/project/PROCESSES.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/PROCESSES.md"
+    install -Dm644 "$startdir/project/SERVERS.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/SERVERS.md"
     install -Dm755 "$startdir/zig-out/bin/leaselinkd" "$pkgdir/usr/bin/leaselinkd"
     install -Dm755 "$startdir/zig-out/bin/kea-leaselink" "$pkgdir/usr/share/kea/scripts/kea-leaselink"
     install -Dm755 "$startdir/packaging/fetch-firewall-certificate.sh" "$pkgdir/usr/share/leaselinkd/fetch-firewall-certificate.sh"
