@@ -1,12 +1,12 @@
 # Memory Requirements
 
-The **KEA‑DNS‑MGR** system is designed to run on a modest home/enterprise DHCP host. `leaselinkd` is serial: it processes one lease event at a time and makes native Zig HTTP(S) calls directly—there is no long-lived external process or `curl` child per API request.
+The **leaselinkd** system is designed to run on a modest home/enterprise DHCP host. `leaselinkd` is serial: it processes one lease event at a time and makes native Zig HTTP(S) calls directly—there is no long-lived external process or `curl` child per API request.
 
 | Component | Description | Approx. RAM (MiB) |
 |-----------|-------------|---------------------|
 | **Kea DHCP4** | Core server, hooks library, `libdhcp_run_script.so` | 8 – 12 (depends on lease table size)
-| **unbound‑mgr (Zig)** | HTTP listener, SQLite ledger, native HTTP/TLS client | 10–20; first HTTPS connection may temporarily use more for CA/TLS buffers
-| **kea‑hook binary** | One-shot event forwarder | < 2 transient
+| **leaselinkd (Zig)** | HTTP listener, SQLite ledger, native HTTP/TLS client | 10–20; first HTTPS connection may temporarily use more for CA/TLS buffers
+| **kea-leaselink binary** | One-shot event forwarder | < 2 transient
 | `sqlite3` DB file | Persistent hostname/UUID/IP ledger | ~0.5 MiB for 100 hosts; WAL files are normal
 | **OPNsense Unbound** | DNS resolver, dynamic overrides cache | 16 – 24 (depends on zones)
 |

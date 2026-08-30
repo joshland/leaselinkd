@@ -1,6 +1,6 @@
-# Kea Lease Manager
+# leaselinkd
 
-`kea-lease-manager` synchronizes Kea DHCPv4 lease events to OPNsense Unbound host overrides.
+`leaselinkd` synchronizes Kea DHCPv4 lease events to OPNsense Unbound host overrides.
 
 It consists of two small Zig 0.16 binaries:
 

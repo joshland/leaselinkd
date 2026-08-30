@@ -1,10 +1,10 @@
 # Maintainer: Joshua Schmidlkofer <joshua@joshuainnovates.us>
-# URL: https://github.com/joshland/kea-lease-manager
-pkgname=kea-lease-manager
+# URL: https://github.com/joshland/leaselinkd
+pkgname=leaselinkd
 pkgver=2.0.0
 pkgrel=1
 arch=('x86_64')
-url="https://github.com/joshland/kea-lease-manager"
+url="https://github.com/joshland/leaselinkd"
 license=('MIT')
 depends=('ca-certificates' 'kea' 'openssl' 'python' 'python-psycopg' 'python-typer' 'sqlite' 'systemd')
 makedepends=('zig')
@@ -34,5 +34,5 @@ package() {
     install -Dm644 "$startdir/examples/kea-hook-config.json" "$pkgdir/etc/kea-dns-mgr/config.json"
     install -Dm644 "$startdir/packaging/leaselinkd.service" "$pkgdir/usr/lib/systemd/system/leaselinkd.service"
     install -Dm644 "$startdir/packaging/leaselinkd.tmpfiles" "$pkgdir/usr/lib/tmpfiles.d/leaselinkd.conf"
-    install -Dm644 "$startdir/packaging/kea-lease-manager.sysusers" "$pkgdir/usr/lib/sysusers.d/kea-lease-manager.conf"
+    install -Dm644 "$startdir/packaging/leaselinkd.sysusers" "$pkgdir/usr/lib/sysusers.d/leaselinkd.conf"
 }

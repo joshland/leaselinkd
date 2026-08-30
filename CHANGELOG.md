@@ -4,14 +4,13 @@ All notable development work is documented here. This project follows semantic v
 
 ## 2.0.0 — Durable lease delivery and reconciliation
 
-- Renamed the `unbound-mgr` daemon and all of its public operational
-  identities to `leaselinkd`, including its executable, service account,
+- Established `leaselinkd` as the daemon and public operational identity,
+  including its executable, service account,
   systemd unit, configuration and state paths, Unix socket, environment
   variables, hook transport key, ownership marker, packaged helpers, and
   OPNsense provisioning identity. This is a breaking deployment rename.
-- Renamed the Kea run-script hook executable and installed script from
-  `kea-opnsense` to `kea-leaselink`. Update Kea's run-script `name` setting
-  when deploying this breaking rename.
+- Established `kea-leaselink` as the Kea run-script hook executable and
+  installed script. Update Kea's run-script `name` setting when deploying.
 - Moved the OPNsense provisioning script into the package and installed it as
   `/usr/share/leaselinkd/provision-opnsense-leaselinkd.php`.
 - Added the packaged `leaselinkd-sync` one-shot importer for active Kea
@@ -209,7 +208,7 @@ All notable development work is documented here. This project follows semantic v
 
 ### Arch packaging
 
-- Added an Arch PKGBUILD for `kea-lease-manager`.
+- Added an Arch PKGBUILD for `leaselinkd`.
 - Corrected package artifact paths for `makepkg` fakeroot execution by using `$startdir` rather than paths relative to `$pkgdir` or the project `src/` directory.
 - Added pacman backup declarations for the manager config, secrets template, and hook config.
 - Verified package creation and archive contents without installing the resulting package.
