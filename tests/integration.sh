@@ -60,7 +60,7 @@ LEASELINKD_CONFIG="$tmp/config.json" LEASELINKD_SECRETS="$tmp/secrets.json" "$ma
 manager_pid=$!
 for _ in $(seq 1 50); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 [ -S "$tmp/unbound.sock" ]
-grep -q 'leaselinkd v2.0.0 starting; architecture=' "$tmp/manager.log"
+grep -q 'leaselinkd v2.0.1 starting; architecture=' "$tmp/manager.log"
 grep -q 'config: api=' "$tmp/manager.log"
 grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
 

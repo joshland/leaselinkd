@@ -2,16 +2,19 @@
 
 All notable development work is documented here. This project follows semantic versioning; entries describe development milestones and may be packaged together when a release is built.
 
-## 2.0.0 — Durable lease delivery and reconciliation
+## 2.0.1 — Configuration and documentation alignment
 
 - Moved the Kea hook transport configuration to `/etc/leaselinkd/hook.json`.
   The hook now uses that path by default and supports `KEA_LEASELINK_CONFIG`
-  for test overrides.
+  for test overrides; package and importer defaults follow the new path.
 - Expanded `check-kea-config.py` to report the status of required Kea DHCPv4
   keys, run-script parameters, installed hook executable, and hook transport
   configuration values.
-- Corrected the architecture reference to document Kea's unprefixed
-  `LEASE4_*` and `LEASES4_*` hook environment variables.
+- Corrected legacy product names and Kea's unprefixed `LEASE4_*` and
+  `LEASES4_*` hook environment-variable references in the documentation.
+
+## 2.0.0 — Durable lease delivery and reconciliation
+
 - Established `leaselinkd` as the daemon and public operational identity,
   including its executable, service account,
   systemd unit, configuration and state paths, Unix socket, environment

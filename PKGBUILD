@@ -1,7 +1,7 @@
 # Maintainer: Joshua Schmidlkofer <joshua@joshuainnovates.us>
 # URL: https://github.com/joshland/leaselinkd
 pkgname=leaselinkd
-pkgver=2.0.0
+pkgver=2.0.1
 pkgrel=1
 arch=('x86_64')
 url="https://github.com/joshland/leaselinkd"
