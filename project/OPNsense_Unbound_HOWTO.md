@@ -5,6 +5,14 @@ firewall. It creates a dedicated least-privilege API account, transfers only
 its generated API key and secret, establishes TLS trust, and verifies the
 connection.
 
+The packaged `/usr/share/leaselinkd/setup-leaselinkd.sh` automates the node
+side as a normal console user and uses `sudo` only for local privileged steps.
+It intentionally does not use the firewall API to establish initial access.
+Give it a certificate DNS SAN hostname and domain; with
+`--transfer-provisioner` it sends this PHP script to the firewall over SSH.
+Without that option, it prints the exact `scp`/`ssh` commands and starts with
+the Web UI URL so the manual process remains available.
+
 ## 1. Provision the firewall API account
 
 Copy the packaged
@@ -139,3 +147,30 @@ sudo systemctl enable --now leaselinkd.service
 
 `--api-test` performs `GET /service/status` and deliberately calls
 `POST /service/reconfigure`, so run it only when applying Unbound is safe.
+It now rejects a firewall where that supported endpoint does not report
+Unbound as `running`.
+
+## Rotation and decommissioning
+
+Rotate without downtime by running the node-side helper as a normal user:
+
+```sh
+/usr/share/leaselinkd/rotate-leaselinkd-api-key.sh --firewall FIREWALL --revoke-old-key
+```
+
+It adds a replacement key on the firewall, replaces the root-only local secret,
+validates the replacement, restarts the manager, then revokes the old key only
+when requested. The firewall script can also be operated explicitly with
+`--rotate-api-key` and `--revoke-api-key OLD_KEY`.
+
+To decommission, stop the node and optionally delete only records bearing the
+`; leaselinkd:` ownership marker:
+
+```sh
+/usr/share/leaselinkd/decommission-leaselinkd.sh --remove-managed-records --yes
+/usr/share/leaselinkd/cleanup-leaselinkd-permissions.sh --yes --purge-state
+```
+
+The cleanup command removes the service user, group, and Kea membership only
+after the service is stopped. Remove the package too if the account must stay
+gone, because its sysusers policy recreates it on installation.

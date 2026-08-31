@@ -42,6 +42,10 @@ The package installs:
 | `/usr/share/leaselinkd/check-firewall-certificate.sh` | Diagnose firewall certificate identity, extensions, and trust-chain failures |
 | `/usr/share/leaselinkd/check-kea-config.py` | Validate Kea DDNS, run-script settings, and hook transport configuration |
 | `/usr/share/leaselinkd/keadb-leaselinkd-sync` | One-shot import of active Kea PostgreSQL leases |
+| `/usr/share/leaselinkd/setup-leaselinkd.sh` | Regular-user, sudo-assisted first-run setup and Kea bootstrap |
+| `/usr/share/leaselinkd/decommission-leaselinkd.sh` | Stop the service and optionally delete owned remote overrides |
+| `/usr/share/leaselinkd/cleanup-leaselinkd-permissions.sh` | Explicit service-account and group cleanup after decommissioning |
+| `/usr/share/leaselinkd/rotate-leaselinkd-api-key.sh` | Safe replacement-key creation, validation, and optional old-key revocation |
 | `/etc/leaselinkd/config.json` | Non-secret manager settings |
 | `/etc/leaselinkd/secrets.json` | OPNsense credentials |
 | `/etc/leaselinkd/hook.json` | Hook transport setting |
@@ -53,6 +57,22 @@ OPNsense group/user/API key, secure credential transfer, TLS trust, and
 verification, see [OPNsense Unbound HOWTO](project/OPNsense_Unbound_HOWTO.md).
 For the equivalent WebGUI-only procedure, see
 [OPNsense manual provisioning](project/OPNsense_Manual_Provisioning.md).
+
+For a guided initial setup from an ordinary console account, use the packaged
+assistant. It deliberately starts at the firewall Web UI and does not use an
+API credential until the firewall-side provisioner (or the manual Web UI flow)
+has created one:
+
+```sh
+/usr/share/leaselinkd/setup-leaselinkd.sh --firewall fw0.example.net \
+  --domain example.net --transfer-provisioner --bootstrap /secure/leaselinkd-bootstrap.json
+```
+
+It fetches the presented CA without trusting it, requires an out-of-band
+fingerprint confirmation, installs and validates the CA, writes the local
+configuration, checks that supported Unbound is running, enables the manager,
+and runs the one-shot Kea importer. Re-running it is safe; it only replaces the
+configured endpoint/domain and supplied credentials.
 
 `/etc/leaselinkd/config.json`:
 

@@ -1,0 +1,7 @@
+{
+  "objective": null,
+  "phase": "idle",
+  "next_action": "Wait for the next user request.",
+  "blocker": null,
+  "verification": null
+}

@@ -1,8 +1,8 @@
 # Maintainer: Joshua Schmidlkofer <joshua@joshuainnovates.us>
 # URL: https://github.com/joshland/leaselinkd
 pkgname=leaselinkd
-pkgver=2.1.0
-pkgrel=7
+pkgver=2.1.1
+pkgrel=1
 install=leaselinkd.install
 arch=('x86_64')
 url="https://github.com/joshland/leaselinkd"
@@ -40,6 +40,10 @@ package() {
     install -Dm755 "$startdir/packaging/check-kea-config.py" "$pkgdir/usr/share/leaselinkd/check-kea-config.py"
     install -Dm755 "$startdir/packaging/keadb-leaselinkd-sync" "$pkgdir/usr/share/leaselinkd/keadb-leaselinkd-sync"
     install -Dm755 "$startdir/packaging/provision-opnsense-leaselinkd.php" "$pkgdir/usr/share/leaselinkd/provision-opnsense-leaselinkd.php"
+    install -Dm755 "$startdir/packaging/setup-leaselinkd.sh" "$pkgdir/usr/share/leaselinkd/setup-leaselinkd.sh"
+    install -Dm755 "$startdir/packaging/decommission-leaselinkd.sh" "$pkgdir/usr/share/leaselinkd/decommission-leaselinkd.sh"
+    install -Dm755 "$startdir/packaging/cleanup-leaselinkd-permissions.sh" "$pkgdir/usr/share/leaselinkd/cleanup-leaselinkd-permissions.sh"
+    install -Dm755 "$startdir/packaging/rotate-leaselinkd-api-key.sh" "$pkgdir/usr/share/leaselinkd/rotate-leaselinkd-api-key.sh"
     install -Dm644 "$startdir/examples/config.json" "$pkgdir/etc/leaselinkd/config.json"
     install -Dm600 "$startdir/examples/secrets.json" "$pkgdir/etc/leaselinkd/secrets.json"
     install -Dm640 "$startdir/examples/hook.json" "$pkgdir/etc/leaselinkd/hook.json"

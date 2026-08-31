@@ -32,7 +32,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
-        self._reply({"rows": []} if self.path.endswith("search_host_override") else {"status": "ok"})
+        self._reply({"rows": []} if self.path.endswith("search_host_override") else {"status": "running"})
 
     def do_POST(self):
         size = int(self.headers.get("Content-Length", "0"))

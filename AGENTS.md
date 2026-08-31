@@ -1,11 +1,21 @@
 # AGENTS
 
-`leaselinkd` is an event-driven Kea DHCPv4 → OPNsense Unbound bridge, currently version `2.1.0`. It uses a lightweight **agent** model: each executable has one responsibility.
+`leaselinkd` is an event-driven Kea DHCPv4 → OPNsense Unbound bridge, currently version `2.1.1`. It uses a lightweight **agent** model: each executable has one responsibility.
 
 1. **leaselinkd** – Persistent systemd daemon. It receives lease events, serializes OPNsense API operations, stores hostname-to-override UUID mappings in SQLite, defers reconfiguration, and health-checks OPNsense.
 2. **kea-leaselink** – One-shot Kea `libdhcp_run_script.so` target. It converts the hook point and Kea environment variables to JSON, forwards one event, and exits.
 
 Both agents share a *Memory* profile described in [MEMORY.md](./MEMORY.md). They are written in Zig `0.16.0` and compiled with release optimisations to minimise runtime footprint.
+
+### Working state
+
+Maintain [`state.json`](./state.json) as the agent's sole short-term working
+state. At the start of every session, read it before asking about prior work.
+Use this fixed schema only: `objective`, `phase`, `next_action`, `blocker`, and
+`verification`. It contains current values required for the next action—not a
+conversation summary, history, or completed-work log. Rewrite it after every
+substantive step, before the next step begins; preserve the same keys even when
+their values are `null`.
 
 ### Agent Communication
 

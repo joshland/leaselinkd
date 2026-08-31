@@ -2,10 +2,27 @@
 
 All notable development work is documented here. This project follows semantic versioning; entries describe development milestones and may be packaged together when a release is built.
 
-## 2.1.0 — Operational resynchronization
+## Unreleased
+
+- Added a regular-user, sudo-assisted idempotent setup assistant that begins
+  with Web UI/SSH provisioning rather than API access, fetches and verifies the
+  firewall certificate, checks the local trust chain, writes configuration,
+  validates running Unbound, and bootstraps active Kea leases.
+- Extended the firewall provisioner to verify that OPNsense exposes supported
+  Unbound status controls and that Unbound is running before it creates access.
+  It now supports staged API-key rotation and guarded old-key revocation.
+- Added explicit decommissioning, owned-override cleanup, service-account
+  cleanup, and API-key rotation helpers. Remote record deletion is opt-in and
+  only matches the durable `leaselinkd` ownership marker.
+- Made `--api-test` reject an API endpoint whose Unbound status is not
+  `running`, rather than treating any successful status response as healthy.
+
+## 2.1.1 — Packaged documentation
 
 - Package the README and operational documentation under
   `/usr/share/doc/leaselinkd-<version>`.
+
+## 2.1.0 — Operational resynchronization
 - Added `SIGUSR2` to request an immediate SQLite-to-OPNsense resync through
   the daemon's serialized reconciliation path.
 - Added `dns_servers` for native UDP A-record validation before updates and

@@ -65,7 +65,12 @@ fn runApiTest(init: std.process.Init, allocator: std.mem.Allocator, options: Com
         _ = c.signal(c.SIGALRM, c.SIG_DFL);
     }
     common.log(.INFO, "testing OPNsense API status ({d} second deadline)", .{runtime.config.api_test_timeout_seconds});
-    _ = try apiGet(&runtime, allocator, "/service/status");
+    const status_response = try apiGet(&runtime, allocator, "/service/status");
+    const Status = struct { status: ?[]const u8 = null };
+    const status = try std.json.parseFromSlice(Status, allocator, status_response, .{ .ignore_unknown_fields = true });
+    defer status.deinit();
+    if (status.value.status == null or !std.ascii.eqlIgnoreCase(status.value.status.?, "running")) return error.UnboundNotRunning;
+    common.log(.INFO, "OPNsense Unbound service is running", .{});
     common.log(.INFO, "testing OPNsense Unbound reconfigure", .{});
     _ = try apiPost(&runtime, allocator, "/service/reconfigure", "{}");
     common.log(.INFO, "API test passed", .{});
