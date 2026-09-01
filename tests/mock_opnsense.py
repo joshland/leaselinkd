@@ -40,7 +40,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._record(body)
         self._reply({"uuid": "override-uuid"} if self.path.endswith("add_host_override") else {})
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("OPNSENSE_BIND_PORT", "0"))), Handler)
+class ReusableThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    allow_reuse_address = True
+
+server = ReusableThreadingHTTPServer(("127.0.0.1", int(os.environ.get("OPNSENSE_BIND_PORT", "0"))), Handler)
 with open(port_file, "w", encoding="utf-8") as out:
     out.write(str(server.server_port))
 server.serve_forever()

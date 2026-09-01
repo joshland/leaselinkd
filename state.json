@@ -1,7 +1,7 @@
 {
-  "objective": null,
-  "phase": "idle",
-  "next_action": "Wait for the next user request.",
+  "objective": "Replace vendored http.zig and metrics.zig with Zig package dependencies and configure build.zig.zon.",
+  "phase": "complete",
+  "next_action": null,
   "blocker": null,
-  "verification": null
+  "verification": "zig build -Doptimize=ReleaseSafe and zig build test -Doptimize=ReleaseSafe passed using the fetched httpz and metrics packages."
 }

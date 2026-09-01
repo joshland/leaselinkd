@@ -85,6 +85,9 @@ configured endpoint/domain and supplied credentials.
   "socket_path": "/run/leaselinkd/fifo.pipe",
   "tcp_host": "127.0.0.1",
   "tcp_port": 9080,
+  "metrics_enabled": true,
+  "metrics_host": "127.0.0.1",
+  "metrics_port": 9108,
   "dns_servers": ["10.0.0.1:53"],
   "throttle_seconds": 10,
   "health_check_seconds": 60,
@@ -111,6 +114,7 @@ The default transport is a Unix socket. To use local TCP instead, set `listen_ty
 ```
 
 `api_timeout_seconds` limits each manager-to-OPNsense API call (default `5`), while `api_test_timeout_seconds` sets the complete `--api-test` deadline (default `60`). `timeout_seconds` limits the hook's complete connection, send, and response sequence to the manager (default `2`). All timeout values must be between 1 and 3600 seconds.
+`leaselinkd` exposes Prometheus metrics at `http://127.0.0.1:9108/metrics` by default. Set `metrics_enabled` to `false` to disable it. `metrics_host` accepts `127.0.0.1` (the safe default) or `0.0.0.0` when a Prometheus server on another host must scrape it; use a firewall or reverse proxy before exposing the latter. Metrics include durable lease intake, lease endpoint latency, OPNsense request rates/failures/bytes/latency, health and reconfigure totals, and process CPU/RSS/virtual-memory gauges. The endpoint also publishes `httpz` listener counters.
 `dns_servers` lists IPv4 UDP resolver endpoints used to validate A records. Each endpoint is `ADDRESS` or `ADDRESS:PORT`; port `53` is used when omitted. An empty list disables DNS validation for backward-compatible deployments. Before applying a desired record, `leaselinkd` queries every configured resolver; a matching address is logged as redundant and avoids an OPNsense write. Startup validates every desired hostname, logging `ERROR` for missing or mismatched records and `WARN` for multiple A records. Missing or mismatched records are queued immediately for an OPNsense update.
 `queue_max_events` bounds the startup-only in-memory lease queue (default and maximum `512`). The manager accepts and coalesces burst events by hostname, serializes firewall writes, and drains queued work after SIGTERM/SIGINT while systemd's stop grace period remains available. One dedicated API worker owns a persistent HTTP/1.1 client, so normal serialized writes reuse its firewall connection. If an API call reaches its deadline or the worker connection fails, the manager terminates that worker and starts a fresh one for the next request; a timed-out mutation is not retried automatically because its remote outcome is unknown.
 
@@ -274,6 +278,21 @@ journalctl -u leaselinkd.service -n 30
 ```
 
 The snapshot includes active configuration (excluding secrets), runtime, received lease events, API GET/POST and failure counts, health-check counts, and completed reconfigures.
+
+## Prometheus and Grafana
+
+Configure Prometheus to scrape the manager (replace the host when Prometheus runs remotely):
+
+```yaml
+scrape_configs:
+  - job_name: leaselinkd
+    static_configs:
+      - targets: ["127.0.0.1:9108"]
+```
+
+Import [`grafana/leaselinkd.json`](grafana/leaselinkd.json) into Grafana and select your Prometheus datasource. It includes lease-event throughput and latency, OPNsense API rate/error/latency/traffic, health checks, reconfigures, CPU, memory, and scrape-listener activity.
+
+The Kea hook remains on the Unix-socket/TCP JSON transport. `http.zig` supports Unix sockets, but replacing the hook path would add concurrent request handling around the daemon's intentionally serialized SQLite and OPNsense work without improving the one-event-per-hook delivery contract. The isolated HTTP listener is therefore used only for Prometheus; a future migration should preserve Unix-socket access control, request deadlines, and the durable `202` acknowledgement semantics.
 
 Request an immediate SQLite-to-OPNsense resync with SIGUSR2:
 

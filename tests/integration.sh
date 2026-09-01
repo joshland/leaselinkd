@@ -13,12 +13,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" &
+python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" >"$tmp/mock.log" 2>&1 &
 opnsense_pid=$!
 for _ in $(seq 1 50); do [ -f "$tmp/opnsense.port" ] && break; sleep 0.05; done
 port=$(cat "$tmp/opnsense.port")
+metrics_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 cat > "$tmp/config.json" <<EOF
-{"opnsense_url":"http://127.0.0.1:$port/api/unbound","db_path":"$tmp/ledger.sqlite","socket_path":"$tmp/unbound.sock","domain":"test","throttle_seconds":1,"health_check_seconds":3600}
+{"opnsense_url":"http://127.0.0.1:$port/api/unbound","db_path":"$tmp/ledger.sqlite","socket_path":"$tmp/unbound.sock","metrics_port":$metrics_port,"domain":"test","throttle_seconds":1,"health_check_seconds":3600}
 EOF
 cat > "$tmp/secrets.json" <<'EOF'
 {"api_key":"key","api_secret":"secret"}
@@ -43,7 +44,7 @@ grep -q 'POST /api/unbound/service/reconfigure' "$tmp/opnsense.log"
 kill "$opnsense_pid"
 wait "$opnsense_pid" 2>/dev/null || true
 rm -f "$tmp/opnsense.port"
-OPNSENSE_BIND_PORT="$port" OPNSENSE_DELAY_SECONDS=6 python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" &
+OPNSENSE_BIND_PORT="$port" OPNSENSE_DELAY_SECONDS=6 python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" >"$tmp/mock.log" 2>&1 &
 opnsense_pid=$!
 for _ in $(seq 1 50); do [ -f "$tmp/opnsense.port" ] && break; sleep 0.05; done
 timeout_started=$(date +%s)
@@ -53,7 +54,7 @@ grep -q 'ApiTimeout' "$tmp/api-timeout.log"
 kill "$opnsense_pid"
 wait "$opnsense_pid" 2>/dev/null || true
 rm -f "$tmp/opnsense.port"
-OPNSENSE_BIND_PORT="$port" python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" &
+OPNSENSE_BIND_PORT="$port" python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" >"$tmp/mock.log" 2>&1 &
 opnsense_pid=$!
 for _ in $(seq 1 50); do [ -f "$tmp/opnsense.port" ] && break; sleep 0.05; done
 : > "$tmp/opnsense.log"
@@ -64,6 +65,8 @@ for _ in $(seq 1 50); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 grep -q 'leaselinkd v2.1.1 starting; architecture=' "$tmp/manager.log"
 grep -q 'config: api=' "$tmp/manager.log"
 grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
+for _ in $(seq 1 50); do python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()" && break; sleep 0.05; done
+python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()"
 
 KEA_LEASE4_HOSTNAME=printer KEA_LEASE4_ADDRESS=192.0.2.50 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --config "$tmp/hook.json" --loglevel DEBUG lease4_committed >"$tmp/hook-add.log" 2>&1
 grep -q 'lease operation complete: event=lease4_committed manager_api=passed' "$tmp/hook-add.log"
@@ -71,6 +74,7 @@ for _ in $(seq 1 50); do [ -f "$tmp/opnsense.log" ] && break; sleep 0.05; done
 for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT hostname || ':' || uuid || ':' || ip_address FROM overrides" | grep -qx 'printer:override-uuid:192.0.2.50' && break; sleep 0.05; done
 sqlite3 "$tmp/ledger.sqlite" "SELECT hostname || ':' || uuid || ':' || ip_address FROM overrides" | grep -qx 'printer:override-uuid:192.0.2.50'
 grep -q 'POST /api/unbound/settings/add_host_override Basic a2V5OnNlY3JldA==' "$tmp/opnsense.log"
+python3 -c "import urllib.request; assert b'leaselinkd_lease_events_total 1' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()"
 for _ in $(seq 1 30); do test "$(grep -c 'service/reconfigure' "$tmp/opnsense.log")" -eq 1 && break; sleep 0.1; done
 test "$(grep -c 'service/reconfigure' "$tmp/opnsense.log")" -eq 1
 
@@ -113,3 +117,8 @@ test "$(grep -c 'GET /api/unbound/settings/search_host_override' "$tmp/opnsense.
 kill -USR1 "$manager_pid"
 for _ in $(seq 1 30); do grep -q 'metrics: runtime=' "$tmp/manager.log" && break; sleep 0.1; done
 grep -q 'metrics: runtime=' "$tmp/manager.log"
+# Capture the final state while the daemon is still alive; KEEP_TEST_TMP=1
+# preserves this artifact for manual load-test inspection.
+python3 -c "import pathlib, urllib.request; pathlib.Path('$tmp/metrics-final.prom').write_bytes(urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read())"
+grep -q '^leaselinkd_lease_events_total ' "$tmp/metrics-final.prom"
+grep -q '^leaselinkd_opnsense_api_requests_total' "$tmp/metrics-final.prom"

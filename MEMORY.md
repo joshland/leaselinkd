@@ -26,7 +26,7 @@ Memory usage is mostly *static*. The key dynamic consumers are:
 
 ### Monitoring Tips
 
-* Use `ps -o pid,rss,cmd` to monitor resident set size.
+* Scrape `http://127.0.0.1:9108/metrics` with Prometheus for process RSS, virtual memory, CPU time, lease intake, and OPNsense API behavior; use `ps -o pid,rss,cmd` for an immediate local check.
 * Send `SIGUSR1` to `leaselinkd` to log runtime, API, health, and reconfigure counters to the journal.
 * Use `journalctl -u leaselinkd.service` for health, API, and malformed payload failures.
 * Ensure only Kea is added to the `leaselinkd` group; the Unix socket is group-writable and API secrets are systemd credentials.

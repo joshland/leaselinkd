@@ -1,0 +1,17 @@
+.{
+    .name = .leaselinkd,
+    .version = "2.1.1",
+    .fingerprint = 0x332e6fdb6f0c1110,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .httpz = .{
+            .url = "git+https://github.com/karlseguin/http.zig?ref=master#9b14af98fde5e98abb9a8376fe02b42003e835bf",
+            .hash = "httpz-0.0.0-PNVzrMgTCQDhzfBLRRebTx9LU056Ph2erdN9-42rFbhj",
+        },
+        .metrics = .{
+            .url = "git+https://github.com/karlseguin/metrics.zig?ref=master#1621f82e7ecf2b3dddf5730bf52761af354a7080",
+            .hash = "metrics-0.0.0-W7G4eJOgAQDBacPAeqGCaY8gV7zuddUQyikGNq7nDPds",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "zig-pkg", "grafana", "tests", "examples", "packaging", "README.md", "CHANGELOG.md", "MEMORY.md", "AGENTS.md", "PKGBUILD", "leaselinkd.install" },
+}

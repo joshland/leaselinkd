@@ -24,6 +24,7 @@ check() {
 package() {
     install -d -m750 "$pkgdir/etc/leaselinkd"
     install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/README.md"
+    install -Dm644 "$startdir/grafana/leaselinkd.json" "$pkgdir/usr/share/doc/$pkgname-$pkgver/grafana/leaselinkd.json"
     install -Dm644 "$startdir/project/ARCHITECTURE.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/ARCHITECTURE.md"
     install -Dm644 "$startdir/project/CONFIGS.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/CONFIGS.md"
     install -Dm644 "$startdir/project/OPNsense_Manual_Provisioning.md" "$pkgdir/usr/share/doc/$pkgname-$pkgver/OPNsense_Manual_Provisioning.md"

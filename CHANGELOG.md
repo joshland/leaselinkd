@@ -4,6 +4,20 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Replaced vendored `http.zig` and `metrics.zig` source trees with pinned Zig
+  package dependencies in `build.zig.zon`; `build.zig` now imports their
+  exported `httpz` and `metrics` modules through Zig's package resolver.
+- Integrated the supplied Zig `metrics.zig` and `http.zig` libraries. The
+  manager now exposes a localhost Prometheus `/metrics` endpoint, including
+  lease intake and API latency histograms, API request/error/byte counters,
+  health/reconfigure totals, process CPU and memory gauges, and `httpz`
+  listener counters.
+- Added configurable Prometheus listener settings and a Grafana dashboard for
+  operational lease, firewall API, resource, and scrape monitoring.
+- Evaluated replacing the Kea hook transport and retained the existing
+  Unix-socket/TCP path: it preserves the daemon's serialized durable-ack
+  semantics and the Unix-socket permission boundary.
+
 - Added a regular-user, sudo-assisted idempotent setup assistant that begins
   with Web UI/SSH provisioning rather than API access, fetches and verifies the
   firewall certificate, checks the local trust chain, writes configuration,

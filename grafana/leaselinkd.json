@@ -1,0 +1,78 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "panels": [
+    {
+      "type": "stat", "title": "Lease events / second", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "sum(rate(leaselinkd_lease_events_total[$__rate_interval]))", "refId": "A" }],
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 }, "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat", "title": "OPNsense API failures / second", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "sum(rate(leaselinkd_opnsense_api_failures_total[$__rate_interval]))", "refId": "A" }],
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 }, "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat", "title": "Resident memory", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "leaselinkd_process_resident_memory_bytes", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 }, "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat", "title": "CPU cores used", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "rate(leaselinkd_process_cpu_user_seconds[$__rate_interval]) + rate(leaselinkd_process_cpu_system_seconds[$__rate_interval])", "refId": "A" }],
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 }, "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "timeseries", "title": "Lease intake and rejections", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(leaselinkd_lease_events_total[$__rate_interval]))", "legendFormat": "accepted", "refId": "A" },
+        { "expr": "sum(rate(leaselinkd_lease_event_rejections_total[$__rate_interval]))", "legendFormat": "rejected", "refId": "B" }
+      ], "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 }
+    },
+    {
+      "type": "timeseries", "title": "Lease endpoint latency (p50 / p95)", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(leaselinkd_lease_event_request_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(leaselinkd_lease_event_request_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "B" }
+      ], "fieldConfig": { "defaults": { "unit": "ms" } }, "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 }
+    },
+    {
+      "type": "timeseries", "title": "OPNsense API requests and failures", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(leaselinkd_opnsense_api_requests_total[$__rate_interval])) by (method)", "legendFormat": "{{method}} requests", "refId": "A" },
+        { "expr": "sum(rate(leaselinkd_opnsense_api_failures_total[$__rate_interval])) by (method)", "legendFormat": "{{method}} failures", "refId": "B" }
+      ], "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 }
+    },
+    {
+      "type": "timeseries", "title": "OPNsense API latency (p50 / p95)", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(leaselinkd_opnsense_api_request_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(leaselinkd_opnsense_api_request_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "B" }
+      ], "fieldConfig": { "defaults": { "unit": "ms" } }, "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 }
+    },
+    {
+      "type": "timeseries", "title": "OPNsense API traffic", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(leaselinkd_opnsense_api_request_bytes_total[$__rate_interval]))", "legendFormat": "sent", "refId": "A" },
+        { "expr": "sum(rate(leaselinkd_opnsense_api_response_bytes_total[$__rate_interval]))", "legendFormat": "received", "refId": "B" }
+      ], "fieldConfig": { "defaults": { "unit": "Bps" } }, "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 }
+    },
+    {
+      "type": "timeseries", "title": "Health, reconfigure, and scrape activity", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "rate(leaselinkd_opnsense_health_checks_total[$__rate_interval])", "legendFormat": "health checks", "refId": "A" },
+        { "expr": "rate(leaselinkd_opnsense_health_failures_total[$__rate_interval])", "legendFormat": "health failures", "refId": "B" },
+        { "expr": "rate(leaselinkd_unbound_reconfigures_total[$__rate_interval])", "legendFormat": "reconfigures", "refId": "C" },
+        { "expr": "rate(httpz_requests_total[$__rate_interval])", "legendFormat": "scrapes", "refId": "D" }
+      ], "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 }
+    }
+  ],
+  "schemaVersion": 41,
+  "tags": ["leaselinkd", "kea", "opnsense", "prometheus"],
+  "templating": { "list": [{ "name": "DS_PROMETHEUS", "type": "datasource", "query": "prometheus", "current": {} }] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "leaselinkd",
+  "uid": "leaselinkd",
+  "version": 1
+}

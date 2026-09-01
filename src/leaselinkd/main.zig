@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("common");
+const prometheus = @import("prometheus.zig");
+const httpz = @import("httpz");
 const c = @cImport({
     @cDefine("_FORTIFY_SOURCE", "0");
     @cInclude("sys/socket.h");
@@ -17,7 +19,7 @@ const c = @cImport({
     @cInclude("sys/wait.h");
     @cInclude("sqlite3.h");
 });
-const Config = struct { opnsense_url: []const u8, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, dns_servers: []const []const u8 = &.{}, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
+const Config = struct { opnsense_url: []const u8, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, metrics_enabled: bool = true, metrics_host: []const u8 = "127.0.0.1", metrics_port: u16 = 9108, dns_servers: []const []const u8 = &.{}, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
 const Secrets = struct { api_key: ?[]const u8 = null, apik_key: ?[]const u8 = null, api_secret: ?[]const u8 = null, apikey_secret: ?[]const u8 = null };
 const max_pending_events = 512;
 const PendingEvent = struct { body: []u8, hostname: []u8 };
@@ -32,6 +34,46 @@ const CommandOptions = struct { command: Command = .run, config_path: ?[]const u
 const api_worker_error: u64 = std.math.maxInt(u64);
 const max_api_frame_bytes = 128 * 1024;
 const ApiRequestHeader = extern struct { method: u8, endpoint_len: u32, body_len: u32 };
+const PrometheusServer = struct {
+    server: httpz.Server(MetricsHandler),
+    thread: std.Thread,
+
+    fn init(init_: std.process.Init, allocator: std.mem.Allocator, config: *const Config) !PrometheusServer {
+        const address: httpz.Config.Address = if (std.mem.eql(u8, config.metrics_host, "127.0.0.1")) .localhost(config.metrics_port) else if (std.mem.eql(u8, config.metrics_host, "0.0.0.0")) .all(config.metrics_port) else return error.InvalidMetricsHost;
+        var server = try httpz.Server(MetricsHandler).init(init_.io, allocator, .{ .address = address, .workers = .{ .count = 1 } }, .{});
+        errdefer server.deinit();
+        return .{ .thread = try server.listenInNewThread(), .server = server };
+    }
+
+    fn deinit(self: *PrometheusServer) void {
+        self.server.stop();
+        self.thread.join();
+        self.server.deinit();
+    }
+};
+
+const MetricsHandler = struct {
+    pub fn handle(_: MetricsHandler, req: *httpz.Request, res: *httpz.Response) void {
+        if (!std.mem.eql(u8, req.url.path, "/metrics")) {
+            res.status = 404;
+            res.body = "Not found\n";
+            return;
+        }
+        res.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+        const writer = res.writer();
+        prometheus.write(writer) catch {
+            res.status = 500;
+            res.clearWriter();
+            res.body = "Unable to render metrics\n";
+            return;
+        };
+        httpz.writeMetrics(writer) catch {
+            res.status = 500;
+            res.clearWriter();
+            res.body = "Unable to render metrics\n";
+        };
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     const options = (try parseCommand(init)) orelse {
@@ -85,6 +127,9 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
     defer _ = c.sqlite3_close(runtime.db);
     defer stopApiWorker(&runtime);
     try validateConfig(&runtime.config);
+    try prometheus.initialize(allocator, init.io);
+    var metrics_server: ?PrometheusServer = if (runtime.config.metrics_enabled) try PrometheusServer.init(init, allocator, &runtime.config) else null;
+    defer if (metrics_server) |*server| server.deinit();
     const unix_mode = std.mem.eql(u8, runtime.config.listen_type, "unix");
     const fd = if (unix_mode) try listenUnix(runtime.config.socket_path) else if (std.mem.eql(u8, runtime.config.listen_type, "tcp")) try listenTcp(runtime.config.tcp_host, runtime.config.tcp_port) else return error.InvalidListenType;
     defer _ = c.close(fd);
@@ -95,6 +140,7 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
     _ = c.signal(c.SIGINT, onShutdown);
     common.log(.INFO, "leaselinkd v{s} starting; architecture={s}; loglevel={s}", .{ common.version, @tagName(builtin.cpu.arch), @tagName(common.logLevel()) });
     common.log(.INFO, "listening via {s}", .{runtime.config.listen_type});
+    if (runtime.config.metrics_enabled) common.log(.INFO, "Prometheus metrics listening on http://{s}:{d}/metrics", .{ runtime.config.metrics_host, runtime.config.metrics_port });
     logConfiguration(&runtime.config, false);
     healthCheck(&runtime, allocator, true);
     reconcile(&runtime, allocator) catch |err| common.log(.WARN, "startup OPNsense reconciliation failed: {t}", .{err});
@@ -176,7 +222,8 @@ fn printHelp(init: std.process.Init) !void {
 }
 fn validateConfig(config: *const Config) !void {
     if (!std.mem.startsWith(u8, config.opnsense_url, "https://") and !std.mem.startsWith(u8, config.opnsense_url, "http://")) return error.InvalidOpnsenseUrl;
-    if (config.record_ttl_seconds <= 0 or config.reconcile_seconds <= 0 or config.queue_max_events == 0 or config.queue_max_events > max_pending_events or config.throttle_seconds < 0 or config.health_check_seconds <= 0 or config.initial_backoff_ms <= 0 or config.max_backoff_ms < config.initial_backoff_ms or config.api_timeout_seconds <= 0 or config.api_timeout_seconds > 3600 or config.api_test_timeout_seconds <= 0 or config.api_test_timeout_seconds > 3600) return error.InvalidTimerConfiguration;
+    if (config.record_ttl_seconds <= 0 or config.reconcile_seconds <= 0 or config.queue_max_events == 0 or config.queue_max_events > max_pending_events or config.throttle_seconds < 0 or config.health_check_seconds <= 0 or config.initial_backoff_ms <= 0 or config.max_backoff_ms < config.initial_backoff_ms or config.api_timeout_seconds <= 0 or config.api_timeout_seconds > 3600 or config.api_test_timeout_seconds <= 0 or config.api_test_timeout_seconds > 3600 or config.metrics_port == 0) return error.InvalidTimerConfiguration;
+    if (!std.mem.eql(u8, config.metrics_host, "127.0.0.1") and !std.mem.eql(u8, config.metrics_host, "0.0.0.0")) return error.InvalidMetricsHost;
     if (std.mem.eql(u8, config.listen_type, "unix")) {
         if (config.socket_path.len == 0 or config.socket_path.len >= 108) return error.InvalidSocketPath;
     } else if (std.mem.eql(u8, config.listen_type, "tcp")) {
@@ -194,7 +241,7 @@ fn onShutdown(_: c_int) callconv(.c) void {
     shutdown_requested.store(1, .release);
 }
 fn logConfiguration(config: *const Config, debug: bool) void {
-    if (debug) common.log(.DEBUG, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ config.opnsense_url, config.listen_type, config.socket_path, config.tcp_host, config.tcp_port, config.domain, config.throttle_seconds, config.health_check_seconds, config.api_timeout_seconds, config.api_test_timeout_seconds }) else common.log(.INFO, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ config.opnsense_url, config.listen_type, config.socket_path, config.tcp_host, config.tcp_port, config.domain, config.throttle_seconds, config.health_check_seconds, config.api_timeout_seconds, config.api_test_timeout_seconds });
+    if (debug) common.log(.DEBUG, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, metrics={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ config.opnsense_url, config.listen_type, config.socket_path, config.tcp_host, config.tcp_port, config.metrics_host, config.metrics_port, config.domain, config.throttle_seconds, config.health_check_seconds, config.api_timeout_seconds, config.api_test_timeout_seconds }) else common.log(.INFO, "config: api={s}, listener={s}, socket={s}, tcp={s}:{d}, metrics={s}:{d}, domain={s}, throttle={d}s, health={d}s, api_timeout={d}s, api_test_timeout={d}s", .{ config.opnsense_url, config.listen_type, config.socket_path, config.tcp_host, config.tcp_port, config.metrics_host, config.metrics_port, config.domain, config.throttle_seconds, config.health_check_seconds, config.api_timeout_seconds, config.api_test_timeout_seconds });
 }
 fn logMetrics(r: *const Runtime) void {
     common.log(.INFO, "metrics: runtime={d}s lease_events={d} api_calls={d} get={d} post={d} api_failures={d} health_checks={d} health_failures={d} reconfigures={d}", .{ nowSeconds() - r.started_at, r.lease_events, r.api_calls, r.api_get_calls, r.api_post_calls, r.api_failures, r.health_checks, r.health_failures, r.reconfigures });
@@ -442,6 +489,7 @@ fn serviceTimers(r: *Runtime, allocator: std.mem.Allocator) void {
             return;
         };
         r.reconfigures += 1;
+        prometheus.reconfigured();
         r.reconfigure_due = null;
     };
     if (now >= r.health_due) healthCheck(r, allocator, false);
@@ -462,6 +510,7 @@ fn requestReconfigure(r: *Runtime) void {
 }
 fn healthCheck(r: *Runtime, allocator: std.mem.Allocator, startup: bool) void {
     r.health_checks += 1;
+    prometheus.healthCheck();
     common.log(.DEBUG, "checking OPNsense health", .{});
     if (apiGet(r, allocator, "/service/status")) |response| {
         r.health_backoff_ms = r.config.initial_backoff_ms;
@@ -478,6 +527,7 @@ fn healthCheck(r: *Runtime, allocator: std.mem.Allocator, startup: bool) void {
         } else common.log(.DEBUG, "OPNsense health check succeeded", .{});
     } else |err| {
         r.health_failures += 1;
+        prometheus.healthFailure();
         const delay = @max(@as(i64, 1), @divTrunc(r.health_backoff_ms + 999, 1000));
         common.log(.WARN, "OPNsense health check failed: {t}; retrying in {d}s", .{ err, delay });
         r.health_due = nowSeconds() + delay;
@@ -485,6 +535,8 @@ fn healthCheck(r: *Runtime, allocator: std.mem.Allocator, startup: bool) void {
     }
 }
 fn processConnection(fd: c_int, allocator: std.mem.Allocator, r: *Runtime) !void {
+    const started = monotonicMilliseconds();
+    defer prometheus.leaseRequestDuration(@intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)));
     var buffer: [65536]u8 = undefined;
     var total: usize = 0;
     while (total < buffer.len) {
@@ -495,34 +547,45 @@ fn processConnection(fd: c_int, allocator: std.mem.Allocator, r: *Runtime) !void
         const at = std.mem.indexOf(u8, request, "\r\n\r\n") orelse continue;
         const content_length = headerContentLength(request[0..at]) orelse {
             common.log(.WARN, "invalid HTTP headers", .{});
+            prometheus.leaseRejected();
             return respond(fd, 400);
         };
         if (total < at + 4 + content_length) continue;
-        if (!std.mem.startsWith(u8, request, "POST /lease_event ")) return respond(fd, 404);
+        if (!std.mem.startsWith(u8, request, "POST /lease_event ")) {
+            prometheus.leaseRejected();
+            return respond(fd, 404);
+        }
         const event = std.json.parseFromSliceLeaky(common.Event, allocator, request[at + 4 .. at + 4 + content_length], .{ .ignore_unknown_fields = true }) catch |err| {
             common.log(.WARN, "invalid lease-event JSON: {t}", .{err});
+            prometheus.leaseRejected();
             return respond(fd, 400);
         };
         if (common.leaseOperation(event.event) == null) {
             common.log(.WARN, "rejecting unsupported Kea hook point: {s}", .{event.event});
+            prometheus.leaseRejected();
             return respond(fd, 422);
         }
         if (!common.validHostLabel(event.lease.hostname)) {
             common.log(.WARN, "ignoring invalid hostname in {s}", .{event.event});
+            prometheus.leaseRejected();
             return respond(fd, 422);
         }
         if (!common.isRemovalEvent(event.event) and !common.validUnboundIpv4(event.lease.@"ip-address")) {
             common.log(.WARN, "ignoring invalid or loopback IPv4 lease address in {s}", .{event.event});
+            prometheus.leaseRejected();
             return respond(fd, 422);
         }
         persistDesired(r, allocator, event) catch |err| {
             common.log(.ERROR, "persisting lease intent failed: {t}", .{err});
+            prometheus.leaseRejected();
             return respond(fd, 503);
         };
         r.lease_events += 1;
+        prometheus.leaseAccepted();
         common.log(.INFO, "persisted lease event={s} host={s} ip={s}", .{ event.event, event.lease.hostname, event.lease.@"ip-address" });
         return respond(fd, 202);
     }
+    prometheus.leaseRejected();
     return respond(fd, 400);
 }
 fn headerContentLength(headers: []const u8) ?usize {
@@ -733,10 +796,15 @@ fn apiGet(r: *Runtime, allocator: std.mem.Allocator, endpoint: []const u8) ![]u8
     return api(r, allocator, .GET, endpoint, null);
 }
 fn api(r: *Runtime, allocator: std.mem.Allocator, method: std.http.Method, endpoint: []const u8, body: ?[]const u8) ![]u8 {
-    return apiWithTimeout(r, allocator, method, endpoint, body) catch |err| {
+    const started = monotonicMilliseconds();
+    const request_bytes = endpoint.len + if (body) |payload| payload.len else 0;
+    const response = apiWithTimeout(r, allocator, method, endpoint, body) catch |err| {
         r.api_failures += 1;
+        prometheus.apiRequest(@tagName(method), request_bytes, @intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)), 0, false);
         return err;
     };
+    prometheus.apiRequest(@tagName(method), request_bytes, @intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)), response.len, true);
+    return response;
 }
 fn apiWithTimeout(r: *const Runtime, allocator: std.mem.Allocator, method: std.http.Method, endpoint: []const u8, body: ?[]const u8) ![]u8 {
     const runtime: *Runtime = @constCast(r);
