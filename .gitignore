@@ -3,3 +3,4 @@ references/
 zig-out
 *.pem
 __pycache__
+state.json

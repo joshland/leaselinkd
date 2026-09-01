@@ -62,7 +62,7 @@ LEASELINKD_CONFIG="$tmp/config.json" LEASELINKD_SECRETS="$tmp/secrets.json" "$ma
 manager_pid=$!
 for _ in $(seq 1 50); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 [ -S "$tmp/unbound.sock" ]
-grep -q 'leaselinkd v3.0.1 starting; architecture=' "$tmp/manager.log"
+grep -q 'leaselinkd v3.0.2 starting; architecture=' "$tmp/manager.log"
 grep -q 'config: api=' "$tmp/manager.log"
 grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
 for _ in $(seq 1 50); do python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()" && break; sleep 0.05; done
@@ -89,6 +89,7 @@ for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM ov
 KEA_LEASE4_HOSTNAME=renewed KEA_LEASE4_ADDRESS=192.0.2.61 KEA_LEASE4_HWADDR=00:11:22:33:44:66 "$hook" --config "$tmp/hook.json" lease4_renew
 for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='renewed'" | grep -qx 192.0.2.61 && break; sleep 0.05; done
 sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='renewed'" | grep -qx 192.0.2.61
+grep -q 'tracked lease IP changed: event=lease4_renew host=renewed previous_ip=192.0.2.60 new_ip=192.0.2.61' "$tmp/manager.log"
 grep -q 'POST /api/unbound/settings/set_host_override/override-uuid' "$tmp/opnsense.log"
 grep -q '"description":"Managed by leaselinkd; leaselinkd:renewed:' "$tmp/opnsense.log"
 KEA_LEASE4_HOSTNAME=renewed KEA_LEASE4_ADDRESS=192.0.2.61 KEA_LEASE4_HWADDR=00:11:22:33:44:66 "$hook" --config "$tmp/hook.json" lease4_decline

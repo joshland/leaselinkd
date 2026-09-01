@@ -4,6 +4,12 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+## 3.0.2 — DNS diagnostics
+
+- Expanded DNS validation diagnostics with expected IP, DNS RCODE, and the
+  first observed A address, and log durable tracked-host IP transitions with
+  both previous and new addresses.
+
 ## 3.0.1 — Package dependency update
 
 ## 3.0.0 — Prometheus observability

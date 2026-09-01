@@ -1,7 +1,0 @@
-{
-  "objective": "Increment leaselinkd release version to 3.0.1 across runtime, packaging, and release documentation.",
-  "phase": "complete",
-  "next_action": null,
-  "blocker": null,
-  "verification": "Canonical runtime, package, manifest, provisioner, importer, and integration-test version identifiers updated to 3.0.1."
-}

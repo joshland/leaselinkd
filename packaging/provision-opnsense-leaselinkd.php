@@ -4,7 +4,7 @@
 if (PHP_SAPI !== 'cli' || posix_geteuid() !== 0) { fwrite(STDERR, "Run as root on OPNsense.\n"); exit(1); }
 require_once('/usr/local/etc/inc/config.inc');
 require_once('/usr/local/etc/inc/auth.inc');
-const VERSION='3.0.1'; const GROUP_NAME='unbound_api'; const USER_NAME='leaselinkd'; const BOOTSTRAP_FILE='/root/leaselinkd-bootstrap.json';
+const VERSION='3.0.2'; const GROUP_NAME='unbound_api'; const USER_NAME='leaselinkd'; const BOOTSTRAP_FILE='/root/leaselinkd-bootstrap.json';
 $privileges=['page-diagnostics-health','page-services-unbound','page-services-dnsresolver-acls','page-services-dnsresolver-advanced','page-services-dnsresolver-overrides','page-services-dnsresolver','page-system-status'];
 $action=$argv[1]??'provision'; $argument=$argv[2]??'';
 if(!in_array($action,['provision','--rotate-api-key','--revoke-api-key'],true)||($action==='--revoke-api-key'&&$argument==='')||count($argv)>($action==='--revoke-api-key'?3:2)){fwrite(STDERR,"Usage: php provision-opnsense-leaselinkd.php [--rotate-api-key | --revoke-api-key API_KEY]\n");exit(64);}

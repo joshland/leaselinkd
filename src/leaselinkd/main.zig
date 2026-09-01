@@ -319,7 +319,7 @@ fn listenTcp(host: []const u8, port: u16) !c_int {
 fn nowSeconds() i64 {
     return @intCast(c.time(null));
 }
-const DnsAnswer = struct { addresses: usize = 0, matches: bool = false };
+const DnsAnswer = struct { addresses: usize = 0, matches: bool = false, rcode: u4 = 0, first_address: ?[4]u8 = null };
 fn dnsServerAddress(server: []const u8) !c.struct_sockaddr_in {
     var host = server;
     var port: u16 = 53;
@@ -402,7 +402,7 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
     const received = c.recv(fd, &reply, reply.len, 0);
     if (received < 12) return error.InvalidDnsReply;
     const bytes = reply[0..@intCast(received)];
-    if (bytes[0] != query[0] or bytes[1] != query[1] or (bytes[3] & 0x0f) != 0) return error.DnsLookupFailed;
+    if (bytes[0] != query[0] or bytes[1] != query[1]) return error.DnsLookupFailed;
     var index: usize = 4;
     const questions = try readU16(bytes, &index);
     const answers = try readU16(bytes, &index);
@@ -412,7 +412,8 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
         index += 4;
         if (index > bytes.len) return error.InvalidDnsReply;
     }
-    var result = DnsAnswer{};
+    var result = DnsAnswer{ .rcode = @truncate(bytes[3] & 0x0f) };
+    if (result.rcode != 0) return result;
     for (0..answers) |_| {
         try skipDnsName(bytes, &index);
         const record_type = try readU16(bytes, &index);
@@ -423,6 +424,7 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
         if (index + length > bytes.len) return error.InvalidDnsReply;
         if (record_type == 1 and record_class == 1 and length == 4) {
             result.addresses += 1;
+            if (result.first_address == null) result.first_address = bytes[index..][0..4].*;
             if (std.mem.eql(u8, bytes[index .. index + 4], &wanted)) result.matches = true;
         }
         index += length;
@@ -435,11 +437,21 @@ fn validateDnsRecord(r: *Runtime, hostname: []const u8, ip: []const u8, startup:
     const fullname = std.fmt.bufPrint(&fullname_buffer, "{s}.{s}", .{ hostname, r.config.domain }) catch hostname;
     for (r.config.dns_servers) |server| {
         const answer = dnsLookup(server, hostname, r.config.domain, ip) catch |err| {
-            if (startup) common.log(.ERROR, "DNS validation failed: server={s} host={s} fqdn={s} error={t}", .{ server, hostname, fullname, err }) else common.log(.WARN, "DNS lookup failed before update: server={s} host={s} fqdn={s} error={t}", .{ server, hostname, fullname, err });
+            if (startup) common.log(.ERROR, "DNS validation failed: server={s} host={s} fqdn={s} expected_ip={s} error={t}", .{ server, hostname, fullname, ip, err }) else common.log(.WARN, "DNS lookup failed before update: server={s} host={s} fqdn={s} expected_ip={s} error={t}", .{ server, hostname, fullname, ip, err });
             continue;
         };
+        if (answer.rcode != 0) {
+            if (startup) common.log(.ERROR, "DNS response error: server={s} host={s} fqdn={s} expected_ip={s} rcode={d}", .{ server, hostname, fullname, ip, answer.rcode }) else common.log(.WARN, "DNS response error: server={s} host={s} fqdn={s} expected_ip={s} rcode={d}", .{ server, hostname, fullname, ip, answer.rcode });
+            continue;
+        }
         if (answer.addresses > 1) common.log(.WARN, "DNS validation found multiple A records: server={s} host={s} count={d}", .{ server, hostname, answer.addresses });
-        if (!answer.matches and startup) common.log(.ERROR, "DNS validation mismatch: server={s} host={s} expected_ip={s}", .{ server, hostname, ip });
+        if (!answer.matches) {
+            if (answer.first_address) |observed| {
+                if (startup) common.log(.ERROR, "DNS validation mismatch: server={s} host={s} fqdn={s} expected_ip={s} observed_ip={d}.{d}.{d}.{d}", .{ server, hostname, fullname, ip, observed[0], observed[1], observed[2], observed[3] }) else common.log(.INFO, "DNS validation mismatch: server={s} host={s} fqdn={s} expected_ip={s} observed_ip={d}.{d}.{d}.{d}", .{ server, hostname, fullname, ip, observed[0], observed[1], observed[2], observed[3] });
+            } else {
+                if (startup) common.log(.ERROR, "DNS validation missing A record: server={s} host={s} fqdn={s} expected_ip={s}", .{ server, hostname, fullname, ip }) else common.log(.INFO, "DNS validation missing A record: server={s} host={s} fqdn={s} expected_ip={s}", .{ server, hostname, fullname, ip });
+            }
+        }
         matches = matches or answer.matches;
     }
     return matches;
@@ -601,8 +613,10 @@ fn respond(fd: c_int, code: u16) !void {
     if (c.send(fd, text.ptr, text.len, 0) < 0) return error.SendFailed;
 }
 fn persistDesired(r: *Runtime, allocator: std.mem.Allocator, event: common.Event) !void {
+    const previous_ip = try desiredIpFor(r.db, allocator, event.lease.hostname);
     const owner = (try ownerFor(r.db, allocator, event.lease.hostname)) orelse try newOwnerId(r.io, allocator);
     const present = !common.isRemovalEvent(event.event);
+    if (present) if (previous_ip) |old_ip| if (!std.mem.eql(u8, old_ip, event.lease.@"ip-address")) common.log(.INFO, "tracked lease IP changed: event={s} host={s} previous_ip={s} new_ip={s}", .{ event.event, event.lease.hostname, old_ip, event.lease.@"ip-address" });
     const lease_ttl = std.fmt.parseInt(i64, event.lease.@"valid-lifetime", 10) catch r.config.record_ttl_seconds;
     const expires = nowSeconds() + @max(@as(i64, 1), if (present) lease_ttl else r.config.record_ttl_seconds);
     var stmt: ?*c.sqlite3_stmt = null;
@@ -629,6 +643,14 @@ fn newOwnerId(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
 fn ownerFor(db: *c.sqlite3, allocator: std.mem.Allocator, hostname: []const u8) !?[]const u8 {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "SELECT owner_id FROM desired_overrides WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
+    defer _ = c.sqlite3_finalize(stmt);
+    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+    return try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0)));
+}
+fn desiredIpFor(db: *c.sqlite3, allocator: std.mem.Allocator, hostname: []const u8) !?[]const u8 {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, "SELECT ip_address FROM desired_overrides WHERE hostname=? AND present=1", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
     _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
     if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
