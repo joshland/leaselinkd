@@ -32,6 +32,24 @@ Memory usage is mostly *static*. The key dynamic consumers are:
 * Ensure only Kea is added to the `leaselinkd` group; the Unix socket is group-writable and API secrets are systemd credentials.
 * Verify OPNsense’s `/var/run/opnsense-dyn.conf.d/overrides.json` does not grow out of hand – if it exceeds a few megabytes, review the reconciliation logic.
 
+### DNS resolver regression guard
+
+The native UDP resolver must retain two layers of coverage. `zig build test`
+includes hermetic byte-level and local-fixture tests for the DNS question
+header, A-record parsing, NXDOMAIN, FORMERR, and malformed replies; these are
+the required CI gate and must not depend on the Internet. Before a release or
+when diagnosing resolver interoperability, run a public smoke test against a
+chosen recursive resolver (for example `1.1.1.1`):
+
+* `host one.one.one.one 1.1.1.1` must return `1.1.1.1` (and may also return
+  `1.0.0.1`).
+* `host example.example 1.1.1.1` must return NXDOMAIN.
+
+An unexpected `FORMERR` for either query indicates a DNS wire-format problem
+in the client request, such as an incorrect DNS header question count. Do not
+make this public check a hermetic CI dependency; resolvers and network access
+may be unavailable there.
+
 ---
 
 The above estimates are conservative and should be revisited once real deployment metrics are available.
