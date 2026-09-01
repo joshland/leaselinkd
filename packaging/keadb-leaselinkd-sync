@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
-VERSION = "2.1.1"
+VERSION = "3.0.1"
 
 if __name__ == "__main__" and sys.argv[1:] == ["--version"]:
     print(f"keadb-leaselinkd-sync {VERSION}")

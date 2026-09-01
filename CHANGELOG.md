@@ -4,6 +4,10 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+## 3.0.1 — Package dependency update
+
+## 3.0.0 — Prometheus observability
+
 - Replaced vendored `http.zig` and `metrics.zig` source trees with pinned Zig
   package dependencies in `build.zig.zon`; `build.zig` now imports their
   exported `httpz` and `metrics` modules through Zig's package resolver.

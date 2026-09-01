@@ -1,7 +1,7 @@
 # Maintainer: Joshua Schmidlkofer <joshua@joshuainnovates.us>
 # URL: https://github.com/joshland/leaselinkd
 pkgname=leaselinkd
-pkgver=2.1.1
+pkgver=3.0.1
 pkgrel=1
 install=leaselinkd.install
 arch=('x86_64')

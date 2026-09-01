@@ -1,7 +1,7 @@
 {
-  "objective": "Replace vendored http.zig and metrics.zig with Zig package dependencies and configure build.zig.zon.",
+  "objective": "Increment leaselinkd release version to 3.0.1 across runtime, packaging, and release documentation.",
   "phase": "complete",
   "next_action": null,
   "blocker": null,
-  "verification": "zig build -Doptimize=ReleaseSafe and zig build test -Doptimize=ReleaseSafe passed using the fetched httpz and metrics packages."
+  "verification": "Canonical runtime, package, manifest, provisioner, importer, and integration-test version identifiers updated to 3.0.1."
 }
