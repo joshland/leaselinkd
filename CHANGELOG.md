@@ -4,6 +4,12 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Fixed native DNS query construction to declare its single question in the
+  DNS header (`QDCOUNT=1`), preventing resolver `FORMERR` responses.
+- Added isolated resolver tests for request encoding, matching A answers,
+  NXDOMAIN/FORMERR handling, and truncated replies. These run as part of
+  `zig build test` and do not query an external DNS server.
+
 ## 3.0.2 — DNS diagnostics
 
 - Expanded DNS validation diagnostics with expected IP, DNS RCODE, and the

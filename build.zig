@@ -16,8 +16,12 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = common });
     const run_tests = b.addRunArtifact(tests);
+    const resolver_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/leaselinkd/main.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "common", .module = common }, .{ .name = "metrics", .module = metrics }, .{ .name = "httpz", .module = httpz } }, .link_libc = true }) });
+    resolver_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    const run_resolver_tests = b.addRunArtifact(resolver_tests);
     const test_step = b.step("test", "Run unit and integration tests");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_resolver_tests.step);
     const integration = b.addSystemCommand(&.{ "sh", "tests/integration.sh" });
     integration.has_side_effects = true;
     integration.addFileArg(ubm.getEmittedBin());

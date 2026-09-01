@@ -17,6 +17,9 @@ conversation summary, history, or completed-work log. Rewrite it after every
 substantive step, before the next step begins; preserve the same keys even when
 their values are `null`.
 
+`state.json` is local agent state: it is intentionally ignored by Git and must
+never be staged or committed. Do not delete it as part of repository cleanup.
+
 ### Agent Communication
 
 - **Transport** – `leaselinkd` exposes HTTP over a Unix socket (`/run/leaselinkd/fifo.pipe`) by default; local TCP is optional. The hook supports both `unix:///path` and `tcp://host:port`.

@@ -370,20 +370,18 @@ fn readU16(buffer: []const u8, index: *usize) !u16 {
     index.* += 2;
     return value;
 }
-fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: []const u8) !DnsAnswer {
-    const address = try dnsServerAddress(server);
-    var wanted: [4]u8 = undefined;
-    const ip_z = try std.heap.page_allocator.dupeZ(u8, ip);
-    if (c.inet_pton(c.AF_INET, ip_z.ptr, &wanted) != 1) return error.InvalidLeaseAddress;
-    var query: [512]u8 = [_]u8{0} ** 512;
-    const id: u16 = @truncate(@as(u64, @intCast(nowSeconds())));
+fn buildDnsQuery(query: []u8, id: u16, hostname: []const u8, domain: []const u8) !usize {
+    if (query.len < 12) return error.InvalidDnsQuery;
+    @memset(query, 0);
     query[0] = @truncate(id >> 8);
     query[1] = @truncate(id);
-    query[2] = 1;
+    query[2] = 1; // recursion desired
+    query[5] = 1; // QDCOUNT: one question follows the DNS header
     var query_len: usize = 12;
     var fullname: [255]u8 = undefined;
     const name = std.fmt.bufPrint(&fullname, "{s}.{s}", .{ hostname, domain }) catch return error.InvalidDnsName;
-    try writeDnsName(&query, &query_len, name);
+    try writeDnsName(query, &query_len, name);
+    if (query_len + 4 > query.len) return error.InvalidDnsName;
     query[query_len] = 0;
     query_len += 1;
     query[query_len] = 1;
@@ -392,16 +390,10 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
     query_len += 1;
     query[query_len] = 1;
     query_len += 1;
-    const fd = c.socket(c.AF_INET, c.SOCK_DGRAM, 0);
-    if (fd < 0) return error.DnsSocketFailed;
-    defer _ = c.close(fd);
-    if (c.sendto(fd, &query, query_len, 0, @ptrCast(&address), @sizeOf(c.struct_sockaddr_in)) < 0) return error.DnsSendFailed;
-    var ready = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
-    if (c.poll(&ready, 1, 2000) <= 0) return error.DnsTimeout;
-    var reply: [2048]u8 = undefined;
-    const received = c.recv(fd, &reply, reply.len, 0);
-    if (received < 12) return error.InvalidDnsReply;
-    const bytes = reply[0..@intCast(received)];
+    return query_len;
+}
+fn parseDnsReply(query: []const u8, bytes: []const u8, wanted: [4]u8) !DnsAnswer {
+    if (query.len < 2 or bytes.len < 12) return error.InvalidDnsReply;
     if (bytes[0] != query[0] or bytes[1] != query[1]) return error.DnsLookupFailed;
     var index: usize = 4;
     const questions = try readU16(bytes, &index);
@@ -430,6 +422,74 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
         index += length;
     }
     return result;
+}
+fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: []const u8) !DnsAnswer {
+    const address = try dnsServerAddress(server);
+    var wanted: [4]u8 = undefined;
+    const ip_z = try std.heap.page_allocator.dupeZ(u8, ip);
+    if (c.inet_pton(c.AF_INET, ip_z.ptr, &wanted) != 1) return error.InvalidLeaseAddress;
+    var query: [512]u8 = undefined;
+    const id: u16 = @truncate(@as(u64, @intCast(nowSeconds())));
+    const query_len = try buildDnsQuery(&query, id, hostname, domain);
+    const fd = c.socket(c.AF_INET, c.SOCK_DGRAM, 0);
+    if (fd < 0) return error.DnsSocketFailed;
+    defer _ = c.close(fd);
+    if (c.sendto(fd, &query, query_len, 0, @ptrCast(&address), @sizeOf(c.struct_sockaddr_in)) < 0) return error.DnsSendFailed;
+    var ready = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
+    if (c.poll(&ready, 1, 2000) <= 0) return error.DnsTimeout;
+    var reply: [2048]u8 = undefined;
+    const received = c.recv(fd, &reply, reply.len, 0);
+    if (received < 12) return error.InvalidDnsReply;
+    const bytes = reply[0..@intCast(received)];
+    return parseDnsReply(query[0..query_len], bytes, wanted);
+}
+test "DNS resolver builds one valid A question" {
+    var query: [512]u8 = undefined;
+    const query_len = try buildDnsQuery(&query, 0x1234, "ranos", "ashbyte.com");
+    try std.testing.expectEqual(@as(usize, 35), query_len);
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x01, 0x00, 0x00, 0x01 }, query[0..6]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x01, 0x00, 0x01 }, query[query_len - 4 .. query_len]);
+}
+test "DNS resolver parses matching A response" {
+    var query: [512]u8 = undefined;
+    const query_len = try buildDnsQuery(&query, 0x1234, "ranos", "ashbyte.com");
+    var reply: [512]u8 = undefined;
+    @memcpy(reply[0..query_len], query[0..query_len]);
+    reply[2] = 0x81;
+    reply[3] = 0x80;
+    reply[6] = 0;
+    reply[7] = 1;
+    var index = query_len;
+    const answer = [_]u8{ 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 10, 12, 1, 81 };
+    @memcpy(reply[index .. index + answer.len], &answer);
+    index += answer.len;
+    const parsed = try parseDnsReply(query[0..query_len], reply[0..index], .{ 10, 12, 1, 81 });
+    try std.testing.expectEqual(@as(u4, 0), parsed.rcode);
+    try std.testing.expectEqual(@as(usize, 1), parsed.addresses);
+    try std.testing.expect(parsed.matches);
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 12, 1, 81 }), parsed.first_address);
+}
+test "DNS resolver reports NXDOMAIN and FORMERR" {
+    var query: [512]u8 = undefined;
+    const query_len = try buildDnsQuery(&query, 0x1234, "cat", "ashbyte.com");
+    var reply: [512]u8 = undefined;
+    @memcpy(reply[0..query_len], query[0..query_len]);
+    reply[2] = 0x81;
+    reply[3] = 0x83;
+    const nxdomain = try parseDnsReply(query[0..query_len], reply[0..query_len], .{ 10, 12, 1, 81 });
+    try std.testing.expectEqual(@as(u4, 3), nxdomain.rcode);
+    reply[3] = 0x81;
+    const formerr = try parseDnsReply(query[0..query_len], reply[0..query_len], .{ 10, 12, 1, 81 });
+    try std.testing.expectEqual(@as(u4, 1), formerr.rcode);
+}
+test "DNS resolver rejects truncated replies" {
+    var query: [512]u8 = undefined;
+    const query_len = try buildDnsQuery(&query, 0x1234, "ranos", "ashbyte.com");
+    var reply: [12]u8 = [_]u8{0} ** 12;
+    reply[0] = query[0];
+    reply[1] = query[1];
+    reply[5] = 1;
+    try std.testing.expectError(error.InvalidDnsReply, parseDnsReply(query[0..query_len], &reply, .{ 10, 12, 1, 81 }));
 }
 fn validateDnsRecord(r: *Runtime, hostname: []const u8, ip: []const u8, startup: bool) !bool {
     var matches = false;
