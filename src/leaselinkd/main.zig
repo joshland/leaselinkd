@@ -211,7 +211,7 @@ fn printHelp(init: std.process.Init) !void {
         \\  --secret <PATH>         Override /etc/leaselinkd/secrets.json.
         \\  --config-check           Validate configuration, credentials, and SQLite access, then exit.
         \\  --api-test               Check the OPNsense API and request an Unbound reconfigure, then exit.
-        \\  --loglevel <LEVEL>       Logging level: ERROR, WARN, INFO, or DEBUG. [default: INFO]
+        \\  --loglevel <LEVEL>       Logging level: ERROR, WARN, INFO, DEBUG, or TRACE. [default: INFO]
         \\  -h, --help               Show this message and exit.
         \\
         \\The manager listens using /etc/leaselinkd/config.json. --api-test has a 60-second
@@ -542,35 +542,45 @@ fn serviceTimers(r: *Runtime) void {
     var work_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer work_arena.deinit();
     const allocator = work_arena.allocator();
-    const due_work = nextDesired(r.db, allocator, nowSeconds()) catch |err| {
-        common.log(.ERROR, "durable work lookup failed: {t}", .{err});
-        return;
-    };
-    if (due_work) |desired| {
-        processDesired(r, allocator, desired) catch |err| {
-            scheduleRetry(r.db, desired.hostname) catch |db_err| common.log(.ERROR, "durable retry scheduling failed: {t}", .{db_err});
-            common.log(.WARN, "durable lease work failed: {t}", .{err});
-        };
-        return;
-    }
     const now = nowSeconds();
+    // Service time-based operations before one durable item. A continuously
+    // dirty queue must not prevent health checks or deferred reconfiguration.
+    if (now >= r.health_due) healthCheckWithAllocator(r, allocator, false);
     if (now >= r.reconcile_due) {
+        common.log(.TRACE, "reconciliation work arena begin", .{});
         reconcileWithAllocator(r, allocator) catch |err| common.log(.WARN, "OPNsense reconciliation failed: {t}", .{err});
+        common.log(.TRACE, "reconciliation work arena release", .{});
         r.reconcile_due = now + r.config.reconcile_seconds;
-        return;
     }
     if (r.reconfigure_due) |due| if (now >= due) {
+        common.log(.TRACE, "reconfigure work arena begin", .{});
         common.log(.INFO, "calling Unbound reconfigure", .{});
         _ = apiPost(r, allocator, "/service/reconfigure", "{}") catch |err| {
             common.log(.ERROR, "Unbound reconfigure failed: {t}", .{err});
             r.reconfigure_due = now + 1;
-            return;
+            common.log(.TRACE, "reconfigure work arena release after failure", .{});
+            return serviceOneDesired(r, allocator, now);
         };
         r.reconfigures += 1;
         prometheus.reconfigured();
         r.reconfigure_due = null;
+        common.log(.TRACE, "reconfigure work arena release", .{});
     };
-    if (now >= r.health_due) healthCheckWithAllocator(r, allocator, false);
+    serviceOneDesired(r, allocator, now);
+}
+fn serviceOneDesired(r: *Runtime, allocator: std.mem.Allocator, now: i64) void {
+    const due_work = nextDesired(r.db, allocator, now) catch |err| {
+        common.log(.ERROR, "durable work lookup failed: {t}", .{err});
+        return;
+    };
+    if (due_work) |desired| {
+        common.log(.TRACE, "timer work arena begin: host={s} present={} ip={s}", .{ desired.hostname, desired.present, desired.ip });
+        processDesired(r, allocator, desired) catch |err| {
+            scheduleRetry(r.db, desired.hostname) catch |db_err| common.log(.ERROR, "durable retry scheduling failed: {t}", .{db_err});
+            common.log(.WARN, "durable lease work failed: {t}", .{err});
+        };
+        common.log(.TRACE, "timer work arena release: host={s}", .{desired.hostname});
+    }
 }
 fn forceResync(r: *Runtime) void {
     common.log(.INFO, "SIGUSR2 requested SQLite-to-OPNsense resync", .{});
@@ -588,7 +598,9 @@ fn requestReconfigure(r: *Runtime) void {
 }
 fn healthCheck(r: *Runtime, startup: bool) void {
     var work_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer common.log(.TRACE, "health-check arena released: startup={}", .{startup});
     defer work_arena.deinit();
+    common.log(.TRACE, "health-check arena begin: startup={}", .{startup});
     healthCheckWithAllocator(r, work_arena.allocator(), startup);
 }
 fn healthCheckWithAllocator(r: *Runtime, allocator: std.mem.Allocator, startup: bool) void {
@@ -619,10 +631,12 @@ fn healthCheckWithAllocator(r: *Runtime, allocator: std.mem.Allocator, startup: 
 }
 fn processConnection(fd: c_int, r: *Runtime) !void {
     var work_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const started = monotonicMilliseconds();
+    defer common.log(.TRACE, "lease request arena released: elapsed_ms={d}", .{monotonicMilliseconds() - started});
+    defer prometheus.leaseRequestDuration(@intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)));
     defer work_arena.deinit();
     const allocator = work_arena.allocator();
-    const started = monotonicMilliseconds();
-    defer prometheus.leaseRequestDuration(@intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)));
+    common.log(.TRACE, "lease request arena begin", .{});
     var buffer: [65536]u8 = undefined;
     var total: usize = 0;
     while (total < buffer.len) {
@@ -904,6 +918,7 @@ fn api(r: *Runtime, allocator: std.mem.Allocator, method: std.http.Method, endpo
         prometheus.apiRequest(@tagName(method), request_bytes, @intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)), 0, false);
         return err;
     };
+    common.log(.TRACE, "OPNsense {s} completed: endpoint={s} request_bytes={d} response_bytes={d}", .{ @tagName(method), endpoint, request_bytes, response.len });
     prometheus.apiRequest(@tagName(method), request_bytes, @intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)), response.len, true);
     return response;
 }
@@ -982,8 +997,10 @@ fn apiWorkerLoop(r: *const Runtime, fd: c_int) void {
         readFdExact(fd, std.mem.asBytes(&header)) catch return;
         if (header.method > 1 or header.endpoint_len > max_api_frame_bytes or header.body_len > max_api_frame_bytes) return;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer common.log(.TRACE, "API worker request arena released", .{});
         defer arena.deinit();
         const allocator = arena.allocator();
+        common.log(.TRACE, "API worker request arena begin: method={s} endpoint_bytes={d} body_bytes={d}", .{ if (header.method == 0) "GET" else "POST", header.endpoint_len, header.body_len });
         const endpoint = allocator.alloc(u8, header.endpoint_len) catch return;
         const body = allocator.alloc(u8, header.body_len) catch return;
         readFdExact(fd, endpoint) catch return;
@@ -994,6 +1011,7 @@ fn apiWorkerLoop(r: *const Runtime, fd: c_int) void {
             continue;
         };
         writeWorkerResponse(fd, response) catch return;
+        common.log(.TRACE, "API worker response written: response_bytes={d}", .{response.len});
     }
 }
 fn writeWorkerResponse(fd: c_int, response: ?[]const u8) !void {

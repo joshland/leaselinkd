@@ -201,7 +201,7 @@ fn printHelp(init: std.process.Init) !void {
         \\
         \\Options:
         \\  --config <PATH>         Override /etc/leaselinkd/hook.json.
-        \\  --loglevel <LEVEL>        Logging level: ERROR, WARN, INFO, or DEBUG. [default: INFO]
+        \\  --loglevel <LEVEL>        Logging level: ERROR, WARN, INFO, DEBUG, or TRACE. [default: INFO]
         \\  -h, --help                Show this message and exit.
         \\
         \\Lease values are read from KEA_LEASE4_HOSTNAME, KEA_LEASE4_ADDRESS, and

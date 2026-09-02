@@ -1,11 +1,11 @@
 const std = @import("std");
 
 pub const version = "3.0.3";
-pub const LogLevel = enum(u8) { ERROR = 0, WARN = 1, INFO = 2, DEBUG = 3 };
+pub const LogLevel = enum(u8) { ERROR = 0, WARN = 1, INFO = 2, DEBUG = 3, TRACE = 4 };
 var active_log_level: LogLevel = .INFO;
 
 pub fn setLogLevel(value: []const u8) !void {
-    active_log_level = if (std.ascii.eqlIgnoreCase(value, "ERROR")) .ERROR else if (std.ascii.eqlIgnoreCase(value, "WARN")) .WARN else if (std.ascii.eqlIgnoreCase(value, "INFO")) .INFO else if (std.ascii.eqlIgnoreCase(value, "DEBUG")) .DEBUG else return error.InvalidLogLevel;
+    active_log_level = if (std.ascii.eqlIgnoreCase(value, "ERROR")) .ERROR else if (std.ascii.eqlIgnoreCase(value, "WARN")) .WARN else if (std.ascii.eqlIgnoreCase(value, "INFO")) .INFO else if (std.ascii.eqlIgnoreCase(value, "DEBUG")) .DEBUG else if (std.ascii.eqlIgnoreCase(value, "TRACE")) .TRACE else return error.InvalidLogLevel;
 }
 pub fn logLevel() LogLevel {
     return active_log_level;
@@ -79,5 +79,7 @@ test "Unbound IPv4 validation" {
 test "log level parser" {
     try setLogLevel("debug");
     try std.testing.expectEqual(LogLevel.DEBUG, logLevel());
+    try setLogLevel("TRACE");
+    try std.testing.expectEqual(LogLevel.TRACE, logLevel());
     try std.testing.expectError(error.InvalidLogLevel, setLogLevel("verbose"));
 }

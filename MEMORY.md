@@ -29,6 +29,15 @@ Memory usage is mostly *static*. The key dynamic consumers are:
 * Scrape `http://127.0.0.1:9108/metrics` with Prometheus for process RSS, virtual memory, CPU time, lease intake, and OPNsense API behavior; use `ps -o pid,rss,cmd` for an immediate local check.
 * Send `SIGUSR1` to `leaselinkd` to log runtime, API, health, and reconfigure counters to the journal.
 * Use `journalctl -u leaselinkd.service` for health, API, and malformed payload failures.
+* For a reproducible leak investigation, run `sh tests/memory_soak.sh
+  zig-out/bin/leaselinkd zig-out/bin/kea-leaselink 10800`. It retains a
+  bounded-host end-to-end evidence directory with `samples.csv`, periodic
+  Prometheus scrapes, manager TRACE lifecycle logs, API traffic, SQLite dump,
+  and periodic `pmap`, full `smaps`, and `lsof` snapshots for both manager and
+  API worker. Set `SOAK_METRICS_ENABLED=false` for a no-scrape control run;
+  `SOAK_MAP_EVERY=12` captures mappings once per minute at the default
+  five-second interval. `TRACE` is deliberately verbose and should only be
+  enabled during time-bounded diagnosis.
 * Ensure only Kea is added to the `leaselinkd` group; the Unix socket is group-writable and API secrets are systemd credentials.
 * Verify OPNsense’s `/var/run/opnsense-dyn.conf.d/overrides.json` does not grow out of hand – if it exceeds a few megabytes, review the reconciliation logic.
 

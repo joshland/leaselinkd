@@ -4,6 +4,24 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Prevented a continuously dirty durable-work queue from starving scheduled
+  OPNsense health checks and deferred Unbound reconfiguration.
+- Added `TESTING.md`, covering hermetic build, integration, burst, DNS,
+  memory-soak, and DNS-aware torture procedures and their retained evidence.
+- Added `TRACE` logging for manager request, timer-work, health-check, and
+  persistent API-worker arena lifecycles, plus API request/response sizes.
+  This level is intended for targeted diagnostics and is disabled by default.
+- Added `tests/memory_soak.sh`, a bounded-state long-running end-to-end mock
+  OPNsense harness. It periodically submits hook events, exercises five-second
+  health checks, scrapes metrics, requests SIGUSR1 summaries, and retains RSS,
+  PSS, VM, FD/thread, SQLite/WAL, API, metric, and trace-log evidence. It now
+  also captures periodic manager/API-worker `pmap`, full `smaps`, and `lsof`
+  snapshots and supports a no-metrics-scrape control run.
+- Added `tests/torture_test.py`, a Python-controlled bounded-host torture
+  harness. It validates user-supplied internal DNS A records and a deliberately
+  mismatching fail record, owns a TRACE manager and mock OPNsense process,
+  repeatedly submits concurrent lease bursts and metrics scrapes, gates known
+  failures, and retains process, DNS, SQLite, API, metrics, and log evidence.
 - Fixed sustained manager RSS growth by giving every lease request, timer work
   item, health check, and reconciliation its own short-lived arena. Parsed
   JSON, SQLite result copies, API payloads/responses, and dynamic endpoint

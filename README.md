@@ -205,11 +205,12 @@ leaselinkd --loglevel DEBUG
 kea-leaselink --loglevel DEBUG lease4_committed
 ```
 
-Set `"loglevel": "DEBUG"` (or `ERROR`, `WARN`, or `INFO`) in either
+Set `"loglevel": "DEBUG"` (or `ERROR`, `WARN`, `INFO`, or `TRACE`) in either
 program's `config.json` to make it the default. An explicit `--loglevel`
 command-line argument takes precedence.
 
-Valid levels are `ERROR`, `WARN`, `INFO` (the default), and `DEBUG`.
+Valid levels are `ERROR`, `WARN`, `INFO` (the default), `DEBUG`, and the
+diagnostic-only `TRACE`.
 At normal startup the manager logs its version, build architecture, safe
 effective configuration, listener, and authenticated firewall health result.
 DEBUG adds hook lease inputs and manager-transmission timing, payloads,
@@ -229,6 +230,42 @@ environment overrides. This permits a non-production test without changing
 leaselinkd --config ./firewall-test.json --secret ./firewall-test-secrets.json --api-test --loglevel DEBUG
 kea-leaselink --config ./hook-test.json lease4_committed
 ```
+
+### Memory torture test
+
+`tests/torture_test.py` runs a bounded-state, Python-controlled stress test
+against a local mock OPNsense API while sending real UDP DNS queries to an
+explicit internal resolver. It starts `leaselinkd` at `TRACE`, submits a burst
+of 512 concurrent lease requests, waits one second, scrapes `/metrics`, waits
+half a second, and repeats for the requested duration. It retains manager and
+mock logs, startup DNS validation, per-round Prometheus scrapes, SQLite state,
+and periodic RSS/PSS/VM/FD/thread, `pmap`, `smaps`, and `lsof` evidence.
+
+Supply known matching DNS labels with `--dns-host`, and choose a fail IP that
+the supplied `--fail-host` and every generated `--force-prefix<N>` label does
+not resolve to. Matching records exercise the redundant-update path; the fixed
+force-host ring exercises actual mock API updates without unbounded database
+growth. For example:
+
+```sh
+python3 tests/torture_test.py \
+  --manager zig-out/bin/leaselinkd \
+  --dns-server 10.0.0.1 \
+  --domain lab.example \
+  --dns-host printer=10.0.0.20 \
+  --dns-host camera=10.0.0.21 \
+  --fail-host failcheck=10.250.0.1 \
+  --force-prefix torturefail \
+  --duration 3600 \
+  --output /tmp/leaselinkd-torture-1h
+```
+
+The manager deliberately acknowledges requests after SQLite persistence, then
+serializes remote work. Consequently, `lease_requests=512/512` confirms intake
+only; `api_host_override_writes` in `summary.txt` is the separate remote-write
+result. The script fails on manager exit, failed lease acknowledgements,
+metrics failures, invalid startup DNS state, known manager/API/health failures,
+or absence of force-path API writes.
 
 Before an API test, confirm the certificate using the same operating-system
 trust store as the manager. This test does not authenticate or alter the

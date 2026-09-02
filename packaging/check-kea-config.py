@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 DEFAULT_KEA_CONFIG = Path("/etc/kea/kea-dhcp4.conf")
 DEFAULT_HOOK_CONFIG = Path("/etc/leaselinkd/hook.json")
 HOOK_EXECUTABLE = Path("/usr/share/kea/scripts/kea-leaselink")
-LOG_LEVELS = {"ERROR", "WARN", "INFO", "DEBUG"}
+LOG_LEVELS = {"ERROR", "WARN", "INFO", "DEBUG", "TRACE"}
 failures = 0
 
 
