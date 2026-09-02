@@ -4,6 +4,18 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Hardened lease intake against slow or malformed clients: accepted sockets are
+  nonblocking, each request has a one-second whole-request deadline, intake is
+  serviced in bounded batches, request length arithmetic is overflow-safe, and
+  ambiguous framing, transfer encodings, and oversized bodies are rejected.
+- Required HTTPS for OPNsense API credentials, disabled authenticated-request
+  redirects, and restricted the optional unauthenticated lease TCP listener to
+  loopback. `allow_insecure_http` is now an explicit test-only opt-in.
+- Corrected the Prometheus server to use its actual one-thread pool setting and
+  set bounded listener buffers, request bodies, and timeouts.
+- Restored dirty state when durable override retry scheduling occurs and freed
+  the hook TCP host string after connection setup.
+
 - Prevented a continuously dirty durable-work queue from starving scheduled
   OPNsense health checks and deferred Unbound reconfiguration.
 - Added `TESTING.md`, covering hermetic build, integration, burst, DNS,

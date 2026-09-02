@@ -154,6 +154,7 @@ class Harness:
         self.port = port_file.read_text(encoding="utf-8").strip()
         config = {
             "opnsense_url": f"http://127.0.0.1:{self.port}/api/unbound",
+            "allow_insecure_http": True,
             "db_path": str(self.output / "ledger.sqlite"),
             "socket_path": str(self.output / "unbound.sock"),
             "metrics_port": self.metrics_port,

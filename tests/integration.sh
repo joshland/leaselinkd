@@ -19,7 +19,7 @@ for _ in $(seq 1 50); do [ -f "$tmp/opnsense.port" ] && break; sleep 0.05; done
 port=$(cat "$tmp/opnsense.port")
 metrics_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 cat > "$tmp/config.json" <<EOF
-{"opnsense_url":"http://127.0.0.1:$port/api/unbound","db_path":"$tmp/ledger.sqlite","socket_path":"$tmp/unbound.sock","metrics_port":$metrics_port,"domain":"test","throttle_seconds":1,"health_check_seconds":3600}
+{"opnsense_url":"http://127.0.0.1:$port/api/unbound","allow_insecure_http":true,"db_path":"$tmp/ledger.sqlite","socket_path":"$tmp/unbound.sock","metrics_port":$metrics_port,"domain":"test","throttle_seconds":1,"health_check_seconds":3600}
 EOF
 cat > "$tmp/secrets.json" <<'EOF'
 {"api_key":"key","api_secret":"secret"}

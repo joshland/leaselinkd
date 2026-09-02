@@ -29,7 +29,7 @@ if [ "${DNS_VALIDATION:-0}" = 1 ]; then
   dns_settings=",\"dns_servers\":[\"127.0.0.1:$dns_port\"]"
 fi
 cat > "$tmp/config.json" <<EOF
-{"opnsense_url":"http://127.0.0.1:$port/api/unbound","db_path":"$tmp/ledger.sqlite","socket_path":"$tmp/unbound.sock","metrics_port":$metrics_port,"domain":"test","throttle_seconds":60,"health_check_seconds":3600$dns_settings}
+{"opnsense_url":"http://127.0.0.1:$port/api/unbound","allow_insecure_http":true,"db_path":"$tmp/ledger.sqlite","socket_path":"$tmp/unbound.sock","metrics_port":$metrics_port,"domain":"test","throttle_seconds":60,"health_check_seconds":3600$dns_settings}
 EOF
 cat > "$tmp/secrets.json" <<'EOF'
 {"api_key":"key","api_secret":"secret"}

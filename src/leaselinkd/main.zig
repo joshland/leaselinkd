@@ -19,9 +19,11 @@ const c = @cImport({
     @cInclude("sys/wait.h");
     @cInclude("sqlite3.h");
 });
-const Config = struct { opnsense_url: []const u8, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, metrics_enabled: bool = true, metrics_host: []const u8 = "127.0.0.1", metrics_port: u16 = 9108, dns_servers: []const []const u8 = &.{}, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
+const Config = struct { opnsense_url: []const u8, allow_insecure_http: bool = false, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, metrics_enabled: bool = true, metrics_host: []const u8 = "127.0.0.1", metrics_port: u16 = 9108, dns_servers: []const []const u8 = &.{}, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
 const Secrets = struct { api_key: ?[]const u8 = null, apik_key: ?[]const u8 = null, api_secret: ?[]const u8 = null, apikey_secret: ?[]const u8 = null };
 const max_pending_events = 512;
+const max_accepts_per_iteration = 8;
+const lease_request_timeout_ms = 1000;
 const PendingEvent = struct { body: []u8, hostname: []u8 };
 const LoadedConfiguration = struct { config: Config, key: []const u8, secret: []const u8 };
 const Runtime = struct { config: Config, key: []const u8, secret: []const u8, db: *c.sqlite3, io: std.Io, started_at: i64, api_worker_fd: c_int = -1, api_worker_pid: c_int = -1, reconfigure_due: ?i64 = null, health_due: i64 = 0, reconcile_due: i64 = 0, health_backoff_ms: i64 = 100, lease_events: u64 = 0, api_calls: u64 = 0, api_get_calls: u64 = 0, api_post_calls: u64 = 0, api_failures: u64 = 0, reconfigures: u64 = 0, health_checks: u64 = 0, health_failures: u64 = 0 };
@@ -40,7 +42,12 @@ const PrometheusServer = struct {
 
     fn init(init_: std.process.Init, allocator: std.mem.Allocator, config: *const Config) !PrometheusServer {
         const address: httpz.Config.Address = if (std.mem.eql(u8, config.metrics_host, "127.0.0.1")) .localhost(config.metrics_port) else if (std.mem.eql(u8, config.metrics_host, "0.0.0.0")) .all(config.metrics_port) else return error.InvalidMetricsHost;
-        var server = try httpz.Server(MetricsHandler).init(init_.io, allocator, .{ .address = address, .workers = .{ .count = 1 } }, .{});
+        var server = try httpz.Server(MetricsHandler).init(init_.io, allocator, .{
+            .address = address,
+            .thread_pool = .{ .count = 1, .backlog = 16, .buffer_size = 4096 },
+            .request = .{ .max_body_size = 1024, .buffer_size = 4096 },
+            .timeout = .{ .request = 5, .keepalive = 5, .request_count = 16 },
+        }, .{});
         errdefer server.deinit();
         return .{ .thread = try server.listenInNewThread(), .server = server };
     }
@@ -153,13 +160,20 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
         }
         var ready = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
         const result = c.poll(&ready, 1, 250);
-        if (result > 0 and (ready.revents & c.POLLIN) != 0) while (true) {
-            const client = c.accept(fd, null, null);
-            if (client >= 0) {
-                processConnection(client, &runtime) catch |err| common.log(.ERROR, "lease event failed: {t}", .{err});
-                _ = c.close(client);
-            } else break;
-        };
+        if (result > 0 and (ready.revents & c.POLLIN) != 0) {
+            var accepted: usize = 0;
+            while (accepted < max_accepts_per_iteration) : (accepted += 1) {
+                const client = c.accept(fd, null, null);
+                if (client >= 0) {
+                    if (!setNonBlocking(client)) {
+                        _ = c.close(client);
+                        continue;
+                    }
+                    processConnection(client, &runtime) catch |err| common.log(.ERROR, "lease event failed: {t}", .{err});
+                    _ = c.close(client);
+                } else break;
+            }
+        }
         if (report_requested.swap(0, .acq_rel) != 0) {
             logConfiguration(&runtime.config, false);
             logMetrics(&runtime);
@@ -221,13 +235,16 @@ fn printHelp(init: std.process.Init) !void {
     try output.interface.flush();
 }
 fn validateConfig(config: *const Config) !void {
-    if (!std.mem.startsWith(u8, config.opnsense_url, "https://") and !std.mem.startsWith(u8, config.opnsense_url, "http://")) return error.InvalidOpnsenseUrl;
+    const https = std.mem.startsWith(u8, config.opnsense_url, "https://");
+    const http = std.mem.startsWith(u8, config.opnsense_url, "http://");
+    if (!https and !http) return error.InvalidOpnsenseUrl;
+    if (http and !config.allow_insecure_http) return error.InsecureHttpDisabled;
     if (config.record_ttl_seconds <= 0 or config.reconcile_seconds <= 0 or config.queue_max_events == 0 or config.queue_max_events > max_pending_events or config.throttle_seconds < 0 or config.health_check_seconds <= 0 or config.initial_backoff_ms <= 0 or config.max_backoff_ms < config.initial_backoff_ms or config.api_timeout_seconds <= 0 or config.api_timeout_seconds > 3600 or config.api_test_timeout_seconds <= 0 or config.api_test_timeout_seconds > 3600 or config.metrics_port == 0) return error.InvalidTimerConfiguration;
     if (!std.mem.eql(u8, config.metrics_host, "127.0.0.1") and !std.mem.eql(u8, config.metrics_host, "0.0.0.0")) return error.InvalidMetricsHost;
     if (std.mem.eql(u8, config.listen_type, "unix")) {
         if (config.socket_path.len == 0 or config.socket_path.len >= 108) return error.InvalidSocketPath;
     } else if (std.mem.eql(u8, config.listen_type, "tcp")) {
-        if (config.tcp_host.len == 0 or config.tcp_port == 0) return error.InvalidTcpConfiguration;
+        if (!std.mem.eql(u8, config.tcp_host, "127.0.0.1") or config.tcp_port == 0) return error.InsecureTcpConfiguration;
     } else return error.InvalidListenType;
     for (config.dns_servers) |server| _ = try dnsServerAddress(server);
 }
@@ -316,6 +333,10 @@ fn listenTcp(host: []const u8, port: u16) !c_int {
     if (c.inet_pton(c.AF_INET, host_z.ptr, &addr.sin_addr) != 1) return error.InvalidTcpHost;
     if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.struct_sockaddr_in)) != 0 or c.listen(fd, max_pending_events) != 0 or c.fcntl(fd, c.F_SETFL, c.fcntl(fd, c.F_GETFL) | c.O_NONBLOCK) < 0) return error.BindFailed;
     return fd;
+}
+fn setNonBlocking(fd: c_int) bool {
+    const flags = c.fcntl(fd, c.F_GETFL);
+    return flags >= 0 and c.fcntl(fd, c.F_SETFL, flags | c.O_NONBLOCK) >= 0;
 }
 fn nowSeconds() i64 {
     return @intCast(c.time(null));
@@ -494,6 +515,23 @@ test "DNS resolver rejects truncated replies" {
     reply[5] = 1;
     try std.testing.expectError(error.InvalidDnsReply, parseDnsReply(query[0..query_len], &reply, .{ 10, 12, 1, 81 }));
 }
+
+test "lease Content-Length parsing rejects ambiguous and unsafe framing" {
+    try std.testing.expectEqual(@as(?usize, 0), headerContentLength("POST /lease_event HTTP/1.1\r\ncontent-length: 0"));
+    try std.testing.expectEqual(@as(?usize, 12), headerContentLength("POST /lease_event HTTP/1.1\r\nContent-Length: 12"));
+    try std.testing.expect(headerContentLength("POST /lease_event HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1") == null);
+    try std.testing.expect(headerContentLength("POST /lease_event HTTP/1.1\r\nTransfer-Encoding: chunked") == null);
+    try std.testing.expect(headerContentLength("POST /lease_event HTTP/1.1\r\nContent-Length: 18446744073709551616") == null);
+}
+
+test "production transport policy requires HTTPS and loopback TCP" {
+    const http = Config{ .opnsense_url = "http://127.0.0.1/api/unbound" };
+    try std.testing.expectError(error.InsecureHttpDisabled, validateConfig(&http));
+    const insecure_loopback = Config{ .opnsense_url = "http://127.0.0.1/api/unbound", .allow_insecure_http = true };
+    try validateConfig(&insecure_loopback);
+    const remote_tcp = Config{ .opnsense_url = "https://opnsense.example/api/unbound", .listen_type = "tcp", .tcp_host = "0.0.0.0" };
+    try std.testing.expectError(error.InsecureTcpConfiguration, validateConfig(&remote_tcp));
+}
 fn validateDnsRecord(r: *Runtime, hostname: []const u8, ip: []const u8, startup: bool) !bool {
     var matches = false;
     var fullname_buffer: [255]u8 = undefined;
@@ -639,9 +677,22 @@ fn processConnection(fd: c_int, r: *Runtime) !void {
     common.log(.TRACE, "lease request arena begin", .{});
     var buffer: [65536]u8 = undefined;
     var total: usize = 0;
+    const deadline = monotonicMilliseconds() + lease_request_timeout_ms;
     while (total < buffer.len) {
         const raw = c.recv(fd, buffer[total..].ptr, buffer.len - total, 0);
-        if (raw <= 0) return;
+        if (raw == 0) return;
+        if (raw < 0) switch (std.posix.errno(raw)) {
+            .AGAIN => waitFd(fd, c.POLLIN, deadline) catch |err| switch (err) {
+                error.ApiTimeout => {
+                    prometheus.leaseRejected();
+                    return respond(fd, 408);
+                },
+                else => return err,
+            },
+            .INTR => continue,
+            else => return error.ReceiveFailed,
+        };
+        if (raw < 0) continue;
         total += @intCast(raw);
         const request = buffer[0..total];
         const at = std.mem.indexOf(u8, request, "\r\n\r\n") orelse continue;
@@ -650,12 +701,21 @@ fn processConnection(fd: c_int, r: *Runtime) !void {
             prometheus.leaseRejected();
             return respond(fd, 400);
         };
-        if (total < at + 4 + content_length) continue;
+        const body_start = std.math.add(usize, at, 4) catch {
+            prometheus.leaseRejected();
+            return respond(fd, 400);
+        };
+        if (content_length > buffer.len - body_start) {
+            prometheus.leaseRejected();
+            return respond(fd, 413);
+        }
+        const body_end = body_start + content_length;
+        if (total < body_end) continue;
         if (!std.mem.startsWith(u8, request, "POST /lease_event ")) {
             prometheus.leaseRejected();
             return respond(fd, 404);
         }
-        const event = std.json.parseFromSliceLeaky(common.Event, allocator, request[at + 4 .. at + 4 + content_length], .{ .ignore_unknown_fields = true }) catch |err| {
+        const event = std.json.parseFromSliceLeaky(common.Event, allocator, request[body_start..body_end], .{ .ignore_unknown_fields = true }) catch |err| {
             common.log(.WARN, "invalid lease-event JSON: {t}", .{err});
             prometheus.leaseRejected();
             return respond(fd, 400);
@@ -691,14 +751,35 @@ fn processConnection(fd: c_int, r: *Runtime) !void {
 fn headerContentLength(headers: []const u8) ?usize {
     var lines = std.mem.splitSequence(u8, headers, "\r\n");
     _ = lines.next();
+    var content_length: ?usize = null;
     while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "Content-Length:")) return std.fmt.parseInt(usize, std.mem.trim(u8, line[15..], " "), 10) catch null;
+        const separator = std.mem.indexOfScalar(u8, line, ':') orelse return null;
+        const name = std.mem.trim(u8, line[0..separator], " \t");
+        const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return null;
+        if (!std.ascii.eqlIgnoreCase(name, "content-length")) continue;
+        if (content_length != null) return null;
+        content_length = std.fmt.parseInt(usize, value, 10) catch return null;
     }
-    return null;
+    return content_length;
 }
 fn respond(fd: c_int, code: u16) !void {
-    const text = if (code == 202) "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n" else if (code == 404) "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n" else if (code == 422) "HTTP/1.1 422 Unprocessable Content\r\nContent-Length: 0\r\n\r\n" else if (code == 503) "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n" else "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-    if (c.send(fd, text.ptr, text.len, 0) < 0) return error.SendFailed;
+    const text = if (code == 202) "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n" else if (code == 404) "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n" else if (code == 408) "HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\n\r\n" else if (code == 413) "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n" else if (code == 422) "HTTP/1.1 422 Unprocessable Content\r\nContent-Length: 0\r\n\r\n" else if (code == 503) "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n" else "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+    const deadline = monotonicMilliseconds() + 250;
+    var offset: usize = 0;
+    while (offset < text.len) {
+        const written = c.send(fd, text[offset..].ptr, text.len - offset, c.MSG_NOSIGNAL);
+        if (written > 0) {
+            offset += @intCast(written);
+            continue;
+        }
+        if (written < 0 and std.posix.errno(written) == .AGAIN) {
+            try waitFd(fd, c.POLLOUT, deadline);
+            continue;
+        }
+        if (written < 0 and std.posix.errno(written) == .INTR) continue;
+        return error.SendFailed;
+    }
 }
 fn persistDesired(r: *Runtime, allocator: std.mem.Allocator, event: common.Event) !void {
     const previous_ip = try desiredIpFor(r.db, allocator, event.lease.hostname);
@@ -819,7 +900,7 @@ fn queueDesired(db: *c.sqlite3, hostname: []const u8) !void {
 }
 fn scheduleRetry(db: *c.sqlite3, hostname: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
-    if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET failures=failures+1,next_attempt=strftime('%s','now') + MIN(300, 1 << MIN(8,failures)) WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
+    if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET dirty=1,failures=failures+1,next_attempt=strftime('%s','now') + MIN(300, 1 << MIN(8,failures)) WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
     _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
@@ -1059,7 +1140,7 @@ fn apiRequestWithClient(r: *const Runtime, allocator: std.mem.Allocator, client:
     _ = std.base64.standard.Encoder.encode(authorization[6..], credentials);
     var response: std.Io.Writer.Allocating = .init(allocator);
     defer response.deinit();
-    const result = try client.fetch(.{ .location = .{ .url = url }, .method = method, .payload = body, .headers = .{ .authorization = .{ .override = authorization } }, .extra_headers = if (body != null) &.{.{ .name = "content-type", .value = "application/json" }} else &.{}, .response_writer = &response.writer });
+    const result = try client.fetch(.{ .location = .{ .url = url }, .method = method, .payload = body, .headers = .{ .authorization = .{ .override = authorization } }, .extra_headers = if (body != null) &.{.{ .name = "content-type", .value = "application/json" }} else &.{}, .redirect_behavior = .not_allowed, .response_writer = &response.writer });
     const code = @intFromEnum(result.status);
     if (code < 200 or code >= 300) {
         common.log(.DEBUG, "OPNsense {s} {s} returned HTTP {d}", .{ @tagName(method), endpoint, code });

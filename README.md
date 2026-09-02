@@ -98,6 +98,11 @@ configured endpoint/domain and supplied credentials.
 }
 ```
 
+The manager requires an `https://` OPNsense URL and refuses redirects for
+authenticated requests. `http://` is available only for isolated local test
+fixtures by setting `"allow_insecure_http": true`; it must never be used for a
+real firewall because HTTP exposes the API credentials and DNS mutations.
+
 `/etc/leaselinkd/secrets.json` must be readable only by the service owner:
 
 ```json
@@ -107,11 +112,14 @@ configured endpoint/domain and supplied credentials.
 }
 ```
 
-The default transport is a Unix socket. To use local TCP instead, set `listen_type` to `"tcp"` and configure the hook with:
+The default transport is a Unix socket. To use local TCP instead, set `listen_type` to `"tcp"` with `tcp_host` fixed to `127.0.0.1` and configure the hook with:
 
 ```json
 { "leaselinkd_address": "tcp://127.0.0.1:9080", "timeout_seconds": 2 }
 ```
+
+The manager rejects non-loopback TCP listeners because this lease endpoint has
+no network authentication. Keep the Unix socket for production deployments.
 
 `api_timeout_seconds` limits each manager-to-OPNsense API call (default `5`), while `api_test_timeout_seconds` sets the complete `--api-test` deadline (default `60`). `timeout_seconds` limits the hook's complete connection, send, and response sequence to the manager (default `2`). All timeout values must be between 1 and 3600 seconds.
 `leaselinkd` exposes Prometheus metrics at `http://127.0.0.1:9108/metrics` by default. Set `metrics_enabled` to `false` to disable it. `metrics_host` accepts `127.0.0.1` (the safe default) or `0.0.0.0` when a Prometheus server on another host must scrape it; use a firewall or reverse proxy before exposing the latter. Metrics include durable lease intake, lease endpoint latency, OPNsense request rates/failures/bytes/latency, health and reconfigure totals, and process CPU/RSS/virtual-memory gauges. The endpoint also publishes `httpz` listener counters.

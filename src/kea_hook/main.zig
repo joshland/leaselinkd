@@ -255,6 +255,7 @@ fn postTcp(address: []const u8, body: []const u8, deadline: Deadline) !void {
     addr.sin_family = c.AF_INET;
     addr.sin_port = c.htons(port);
     const host_z = try std.heap.page_allocator.dupeZ(u8, host);
+    defer std.heap.page_allocator.free(host_z);
     if (c.inet_pton(c.AF_INET, host_z.ptr, &addr.sin_addr) != 1) return error.InvalidManagerAddress;
     try connectWithDeadline(fd, @ptrCast(&addr), @sizeOf(c.struct_sockaddr_in), deadline);
     try sendEvent(fd, body, deadline);
