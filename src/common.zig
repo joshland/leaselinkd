@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const version = "3.0.3";
+pub const version = "3.0.4";
 pub const LogLevel = enum(u8) { ERROR = 0, WARN = 1, INFO = 2, DEBUG = 3, TRACE = 4 };
 var active_log_level: LogLevel = .INFO;
 
@@ -79,7 +79,7 @@ test "Unbound IPv4 validation" {
 test "log level parser" {
     try setLogLevel("debug");
     try std.testing.expectEqual(LogLevel.DEBUG, logLevel());
-    try setLogLevel("TRACE");
+    try setLogLevel("trace");
     try std.testing.expectEqual(LogLevel.TRACE, logLevel());
     try std.testing.expectError(error.InvalidLogLevel, setLogLevel("verbose"));
 }
