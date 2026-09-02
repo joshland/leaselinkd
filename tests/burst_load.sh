@@ -41,6 +41,17 @@ for _ in $(seq 1 100); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 python3 tests/burst_lease_events.py "$tmp/unbound.sock" "$count" "load$count" | tee "$tmp/load-result.txt"
 for _ in $(seq 1 100); do sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM desired_overrides WHERE present=1' | grep -qx "$count" && break; sleep 0.05; done
 sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM desired_overrides WHERE present=1' | grep -qx "$count"
+# The manager must release request-local JSON and SQLite copies after each
+# accepted lease. A second distinct burst therefore must not add another
+# allocator-sized RSS step to the manager process.
+rss_after_first=$(awk '/VmRSS:/ { print $2 }' "/proc/$manager_pid/status")
+python3 tests/burst_lease_events.py "$tmp/unbound.sock" "$count" "repeat$count" | tee "$tmp/repeat-load-result.txt"
+expected_count=$((count * 2))
+for _ in $(seq 1 100); do sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM desired_overrides WHERE present=1' | grep -qx "$expected_count" && break; sleep 0.05; done
+sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM desired_overrides WHERE present=1' | grep -qx "$expected_count"
+rss_after_second=$(awk '/VmRSS:/ { print $2 }' "/proc/$manager_pid/status")
+# Allow a small allocator/cache fluctuation while rejecting linear growth.
+[ $((rss_after_second - rss_after_first)) -le 4096 ]
 if [ "${DNS_VALIDATION:-0}" = 1 ]; then
   required_completions=${DNS_MIN_COMPLETIONS:-$count}
   [ "$required_completions" -gt 0 ] && [ "$required_completions" -le "$count" ]
@@ -57,4 +68,4 @@ if [ "${DNS_VALIDATION:-0}" = 1 ]; then
   printf 'dns_queries=%s api_add_responses=%s required_completions=%s\n' "$dns_queries" "$api_adds" "$required_completions" | tee "$tmp/dns-api-result.txt"
 fi
 python3 -c "import pathlib, urllib.request; pathlib.Path('$tmp/metrics-final.prom').write_bytes(urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read())"
-grep -qx "leaselinkd_lease_events_total $count" "$tmp/metrics-final.prom"
+grep -qx "leaselinkd_lease_events_total $expected_count" "$tmp/metrics-final.prom"

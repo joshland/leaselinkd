@@ -62,7 +62,7 @@ LEASELINKD_CONFIG="$tmp/config.json" LEASELINKD_SECRETS="$tmp/secrets.json" "$ma
 manager_pid=$!
 for _ in $(seq 1 50); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 [ -S "$tmp/unbound.sock" ]
-grep -q 'leaselinkd v3.0.2 starting; architecture=' "$tmp/manager.log"
+grep -q 'leaselinkd v3.0.3 starting; architecture=' "$tmp/manager.log"
 grep -q 'config: api=' "$tmp/manager.log"
 grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
 for _ in $(seq 1 50); do python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()" && break; sleep 0.05; done

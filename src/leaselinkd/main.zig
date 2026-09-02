@@ -142,8 +142,8 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
     common.log(.INFO, "listening via {s}", .{runtime.config.listen_type});
     if (runtime.config.metrics_enabled) common.log(.INFO, "Prometheus metrics listening on http://{s}:{d}/metrics", .{ runtime.config.metrics_host, runtime.config.metrics_port });
     logConfiguration(&runtime.config, false);
-    healthCheck(&runtime, allocator, true);
-    reconcile(&runtime, allocator) catch |err| common.log(.WARN, "startup OPNsense reconciliation failed: {t}", .{err});
+    healthCheck(&runtime, true);
+    reconcile(&runtime) catch |err| common.log(.WARN, "startup OPNsense reconciliation failed: {t}", .{err});
     runtime.reconcile_due = nowSeconds() + runtime.config.reconcile_seconds;
     validateDnsState(&runtime);
     while (true) {
@@ -156,7 +156,7 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
         if (result > 0 and (ready.revents & c.POLLIN) != 0) while (true) {
             const client = c.accept(fd, null, null);
             if (client >= 0) {
-                processConnection(client, allocator, &runtime) catch |err| common.log(.ERROR, "lease event failed: {t}", .{err});
+                processConnection(client, &runtime) catch |err| common.log(.ERROR, "lease event failed: {t}", .{err});
                 _ = c.close(client);
             } else break;
         };
@@ -165,9 +165,9 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
             logMetrics(&runtime);
         }
         if (resync_requested.swap(0, .acq_rel) != 0) {
-            forceResync(&runtime, allocator);
+            forceResync(&runtime);
         }
-        serviceTimers(&runtime, allocator);
+        serviceTimers(&runtime);
     }
 }
 fn parseCommand(init: std.process.Init) !?CommandOptions {
@@ -312,6 +312,7 @@ fn listenTcp(host: []const u8, port: u16) !c_int {
     addr.sin_family = c.AF_INET;
     addr.sin_port = c.htons(port);
     const host_z = try std.heap.page_allocator.dupeZ(u8, host);
+    defer std.heap.page_allocator.free(host_z);
     if (c.inet_pton(c.AF_INET, host_z.ptr, &addr.sin_addr) != 1) return error.InvalidTcpHost;
     if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.struct_sockaddr_in)) != 0 or c.listen(fd, max_pending_events) != 0 or c.fcntl(fd, c.F_SETFL, c.fcntl(fd, c.F_GETFL) | c.O_NONBLOCK) < 0) return error.BindFailed;
     return fd;
@@ -329,6 +330,7 @@ fn dnsServerAddress(server: []const u8) !c.struct_sockaddr_in {
     }
     if (host.len == 0 or port == 0) return error.InvalidDnsServer;
     const host_z = try std.heap.page_allocator.dupeZ(u8, host);
+    defer std.heap.page_allocator.free(host_z);
     var address = std.mem.zeroes(c.struct_sockaddr_in);
     address.sin_family = c.AF_INET;
     address.sin_port = c.htons(port);
@@ -427,6 +429,7 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
     const address = try dnsServerAddress(server);
     var wanted: [4]u8 = undefined;
     const ip_z = try std.heap.page_allocator.dupeZ(u8, ip);
+    defer std.heap.page_allocator.free(ip_z);
     if (c.inet_pton(c.AF_INET, ip_z.ptr, &wanted) != 1) return error.InvalidLeaseAddress;
     var query: [512]u8 = undefined;
     const id: u16 = @truncate(@as(u64, @intCast(nowSeconds())));
@@ -534,8 +537,11 @@ fn validateDnsState(r: *Runtime) void {
         }
     }
 }
-fn serviceTimers(r: *Runtime, allocator: std.mem.Allocator) void {
+fn serviceTimers(r: *Runtime) void {
     expireDesired(r) catch |err| common.log(.ERROR, "TTL cleanup failed: {t}", .{err});
+    var work_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer work_arena.deinit();
+    const allocator = work_arena.allocator();
     const due_work = nextDesired(r.db, allocator, nowSeconds()) catch |err| {
         common.log(.ERROR, "durable work lookup failed: {t}", .{err});
         return;
@@ -549,7 +555,7 @@ fn serviceTimers(r: *Runtime, allocator: std.mem.Allocator) void {
     }
     const now = nowSeconds();
     if (now >= r.reconcile_due) {
-        reconcile(r, allocator) catch |err| common.log(.WARN, "OPNsense reconciliation failed: {t}", .{err});
+        reconcileWithAllocator(r, allocator) catch |err| common.log(.WARN, "OPNsense reconciliation failed: {t}", .{err});
         r.reconcile_due = now + r.config.reconcile_seconds;
         return;
     }
@@ -564,11 +570,11 @@ fn serviceTimers(r: *Runtime, allocator: std.mem.Allocator) void {
         prometheus.reconfigured();
         r.reconfigure_due = null;
     };
-    if (now >= r.health_due) healthCheck(r, allocator, false);
+    if (now >= r.health_due) healthCheckWithAllocator(r, allocator, false);
 }
-fn forceResync(r: *Runtime, allocator: std.mem.Allocator) void {
+fn forceResync(r: *Runtime) void {
     common.log(.INFO, "SIGUSR2 requested SQLite-to-OPNsense resync", .{});
-    reconcile(r, allocator) catch |err| {
+    reconcile(r) catch |err| {
         common.log(.WARN, "requested OPNsense resync failed: {t}", .{err});
         return;
     };
@@ -580,7 +586,12 @@ fn requestReconfigure(r: *Runtime) void {
     r.reconfigure_due = if (r.reconfigure_due) |existing| @min(existing, due) else due;
     common.log(.DEBUG, "reconfigure scheduled for {d}", .{r.reconfigure_due.?});
 }
-fn healthCheck(r: *Runtime, allocator: std.mem.Allocator, startup: bool) void {
+fn healthCheck(r: *Runtime, startup: bool) void {
+    var work_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer work_arena.deinit();
+    healthCheckWithAllocator(r, work_arena.allocator(), startup);
+}
+fn healthCheckWithAllocator(r: *Runtime, allocator: std.mem.Allocator, startup: bool) void {
     r.health_checks += 1;
     prometheus.healthCheck();
     common.log(.DEBUG, "checking OPNsense health", .{});
@@ -606,7 +617,10 @@ fn healthCheck(r: *Runtime, allocator: std.mem.Allocator, startup: bool) void {
         r.health_backoff_ms = @min(r.health_backoff_ms * 2, r.config.max_backoff_ms);
     }
 }
-fn processConnection(fd: c_int, allocator: std.mem.Allocator, r: *Runtime) !void {
+fn processConnection(fd: c_int, r: *Runtime) !void {
+    var work_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer work_arena.deinit();
+    const allocator = work_arena.allocator();
     const started = monotonicMilliseconds();
     defer prometheus.leaseRequestDuration(@intCast(@max(@as(i64, 0), monotonicMilliseconds() - started)));
     var buffer: [65536]u8 = undefined;
@@ -803,7 +817,12 @@ fn sqlDeleteDesired(db: *c.sqlite3, hostname: []const u8) !void {
     _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
-fn reconcile(r: *Runtime, allocator: std.mem.Allocator) !void {
+fn reconcile(r: *Runtime) !void {
+    var work_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer work_arena.deinit();
+    return reconcileWithAllocator(r, work_arena.allocator());
+}
+fn reconcileWithAllocator(r: *Runtime, allocator: std.mem.Allocator) !void {
     const Remote = struct { uuid: ?[]const u8 = null, description: ?[]const u8 = null };
     const Reply = struct { rows: ?[]Remote = null };
     const response = try apiGet(r, allocator, "/settings/search_host_override");

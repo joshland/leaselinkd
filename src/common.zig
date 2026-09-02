@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const version = "3.0.2";
+pub const version = "3.0.3";
 pub const LogLevel = enum(u8) { ERROR = 0, WARN = 1, INFO = 2, DEBUG = 3 };
 var active_log_level: LogLevel = .INFO;
 

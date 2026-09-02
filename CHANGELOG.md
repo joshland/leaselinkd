@@ -4,6 +4,15 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Fixed sustained manager RSS growth by giving every lease request, timer work
+  item, health check, and reconciliation its own short-lived arena. Parsed
+  JSON, SQLite result copies, API payloads/responses, and dynamic endpoint
+  strings are now released when that unit of work completes instead of being
+  retained in the daemon's process-lifetime configuration arena.
+- Released temporary C strings used by TCP listener and DNS validation helpers.
+
+## 3.0.3 — DNS resolver reliability
+
 - Fixed native DNS query construction to declare its single question in the
   DNS header (`QDCOUNT=1`), preventing resolver `FORMERR` responses.
 - Added isolated resolver tests for request encoding, matching A answers,
