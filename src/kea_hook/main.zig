@@ -9,10 +9,12 @@ const c = @cImport({
     @cInclude("poll.h");
     @cInclude("fcntl.h");
     @cInclude("time.h");
+    @cInclude("signal.h");
     @cInclude("unistd.h");
 });
 const HookConfig = struct { leaselinkd_address: []const u8 = "unix:///run/leaselinkd/fifo.pipe", timeout_seconds: i64 = 2, loglevel: ?[]const u8 = null };
 const CommandOptions = struct { event: []const u8, config_path: ?[]const u8 = null, loglevel_set: bool = false };
+const max_batch_entries = 256;
 const Deadline = struct {
     at_ms: i64,
     fn init(timeout_seconds: i64) Deadline {
@@ -26,6 +28,7 @@ const Deadline = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    _ = c.signal(c.SIGPIPE, c.SIG_IGN);
     const started_at = monotonicMilliseconds();
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -50,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
         common.log(.ERROR, "cannot forward unknown Kea hook point: {s}", .{options.event});
         return error.UnsupportedLeaseOperation;
     };
-    common.log(.INFO, "Kea hook point received: {s} (operation={s})", .{ options.event, @tagName(operation) });
+    common.log(.DEBUG, "Kea hook point received: {s} (operation={s})", .{ options.event, @tagName(operation) });
     const env = init.minimal.environ;
     if (std.mem.eql(u8, options.event, "leases4_committed")) return forwardCommittedBatch(init, allocator, options, started_at);
     const hostname = envValue(env, "KEA_LEASE4_HOSTNAME", "LEASE4_HOSTNAME") orelse {
@@ -78,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
         common.log(.ERROR, "cannot forward event={s}: invalid lease address", .{options.event});
         return error.InvalidLeaseAddress;
     }
-    common.log(.INFO, "lease operation={s} host={s} ip={s}", .{ options.event, hostname, ip });
+    common.log(.DEBUG, "lease operation={s} host={s} ip={s}", .{ options.event, hostname, ip });
     common.log(.DEBUG, "Kea lease parameters: KEA_LEASE4_HOSTNAME={s}; KEA_LEASE4_ADDRESS={s}; KEA_LEASE4_HWADDR={s}; KEA_LEASE4_VALID_LIFETIME={s}; KEA_LEASE4_SUBNET_ID={s}; KEA_QUERY4_INTERFACE={s}; operation={s}", .{ hostname, ip, mac, valid_lifetime, subnet_id, query_interface, options.event });
     if (config.timeout_seconds <= 0 or config.timeout_seconds > 3600) {
         common.log(.ERROR, "cannot forward event={s}: invalid manager timeout={d}s", .{ options.event, config.timeout_seconds });
@@ -114,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
     const call_ms = monotonicMilliseconds() - call_started_at;
     const total_ms = monotonicMilliseconds() - started_at;
     common.log(.DEBUG, "manager transmission passed: event={s} call_ms={d} total_ms={d}", .{ options.event, call_ms, total_ms });
-    common.log(.INFO, "lease operation complete: event={s} manager_api=passed call_ms={d} total_ms={d}", .{ options.event, call_ms, total_ms });
+    common.log(.DEBUG, "lease operation complete: event={s} manager_api=passed call_ms={d} total_ms={d}", .{ options.event, call_ms, total_ms });
 }
 fn forwardCommittedBatch(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOptions, started_at: i64) !void {
     const env = init.minimal.environ;
@@ -123,6 +126,8 @@ fn forwardCommittedBatch(init: std.process.Init, allocator: std.mem.Allocator, o
     if (config.timeout_seconds <= 0 or config.timeout_seconds > 3600) return error.InvalidTimeout;
     const count_text = envValue(env, "KEA_LEASES4_SIZE", "LEASES4_SIZE") orelse return error.MissingLeaseBatchSize;
     const count = try std.fmt.parseInt(usize, count_text, 10);
+    if (count > max_batch_entries) return error.BatchTooLarge;
+    const deadline = Deadline.init(config.timeout_seconds);
     var forwarded: usize = 0;
     for (0..count) |index| {
         const hostname_name = try std.fmt.allocPrint(allocator, "KEA_LEASES4_AT{d}_HOSTNAME", .{index});
@@ -145,7 +150,11 @@ fn forwardCommittedBatch(init: std.process.Init, allocator: std.mem.Allocator, o
         const upstream_mac_name = try std.fmt.allocPrint(allocator, "LEASES4_AT{d}_HWADDR", .{index});
         const lifetime_name = try std.fmt.allocPrint(allocator, "KEA_LEASES4_AT{d}_VALID_LIFETIME", .{index});
         const upstream_lifetime_name = try std.fmt.allocPrint(allocator, "LEASES4_AT{d}_VALID_LIFETIME", .{index});
-        try forwardLease(config, allocator, hostname, ip, envValue(env, mac_name, upstream_mac_name) orelse "", envValue(env, lifetime_name, upstream_lifetime_name) orelse "", "lease4_committed");
+        forwardLease(config.leaselinkd_address, allocator, hostname, ip, envValue(env, mac_name, upstream_mac_name) orelse "", envValue(env, lifetime_name, upstream_lifetime_name) orelse "", "lease4_committed", deadline) catch |err| {
+            common.log(.WARN, "leases4_committed entry {d} transmission failed: {t}", .{ index, err });
+            if (err == error.ManagerTimeout) return err;
+            continue;
+        };
         forwarded += 1;
     }
     common.log(.INFO, "leases4_committed batch complete: forwarded={d} entries total_ms={d}", .{ forwarded, monotonicMilliseconds() - started_at });
@@ -153,7 +162,7 @@ fn forwardCommittedBatch(init: std.process.Init, allocator: std.mem.Allocator, o
 fn envValue(env: std.process.Environ, preferred: []const u8, upstream: []const u8) ?[]const u8 {
     return env.getPosix(preferred) orelse env.getPosix(upstream);
 }
-fn forwardLease(config: HookConfig, allocator: std.mem.Allocator, hostname: []const u8, ip: []const u8, mac: []const u8, lifetime: []const u8, event: []const u8) !void {
+fn forwardLease(address: []const u8, allocator: std.mem.Allocator, hostname: []const u8, ip: []const u8, mac: []const u8, lifetime: []const u8, event: []const u8, deadline: Deadline) !void {
     var body: std.Io.Writer.Allocating = .init(allocator);
     defer body.deinit();
     try body.writer.writeAll("{\"event\":\"");
@@ -167,7 +176,7 @@ fn forwardLease(config: HookConfig, allocator: std.mem.Allocator, hostname: []co
     try body.writer.writeAll("\",\"valid-lifetime\":\"");
     try common.jsonEscape(&body.writer, lifetime);
     try body.writer.writeAll("\",\"subnet-id\":\"\",\"query-interface\":\"\"}}");
-    try post(config.leaselinkd_address, body.written(), Deadline.init(config.timeout_seconds));
+    try post(address, body.written(), deadline);
 }
 fn parseCommand(args: []const []const u8) !?CommandOptions {
     var event: ?[]const u8 = null;
@@ -213,7 +222,7 @@ fn printHelp(init: std.process.Init) !void {
 fn loadConfig(init: std.process.Init, allocator: std.mem.Allocator, config_path: ?[]const u8) !HookConfig {
     const path = config_path orelse init.minimal.environ.getPosix("KEA_LEASELINK_CONFIG") orelse "/etc/leaselinkd/hook.json";
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, allocator, .limited(64 * 1024));
-    return try std.json.parseFromSliceLeaky(HookConfig, allocator, bytes, .{ .ignore_unknown_fields = true });
+    return try std.json.parseFromSliceLeaky(HookConfig, allocator, bytes, .{});
 }
 fn post(address: []const u8, body: []const u8, deadline: Deadline) !void {
     if (std.mem.startsWith(u8, address, "unix://")) return postUnix(address[7..], body, deadline);
@@ -270,10 +279,14 @@ fn setNonBlocking(fd: c_int) !void {
     if (flags < 0 or c.fcntl(fd, c.F_SETFL, flags | c.O_NONBLOCK) < 0) return error.SocketConfigurationFailed;
 }
 fn waitFor(fd: c_int, events: c_short, deadline: Deadline) !void {
-    var ready = c.struct_pollfd{ .fd = fd, .events = events, .revents = 0 };
-    const result = c.poll(&ready, 1, try deadline.remainingMs());
-    if (result == 0) return error.ManagerTimeout;
-    if (result < 0 or (ready.revents & c.POLLNVAL) != 0 or (ready.revents & events) == 0) return error.SocketFailed;
+    while (true) {
+        var ready = c.struct_pollfd{ .fd = fd, .events = events, .revents = 0 };
+        const result = c.poll(&ready, 1, try deadline.remainingMs());
+        if (result == 0) return error.ManagerTimeout;
+        if (result < 0 and std.posix.errno(result) == .INTR) continue;
+        if (result < 0 or (ready.revents & c.POLLNVAL) != 0 or (ready.revents & events) == 0) return error.SocketFailed;
+        return;
+    }
 }
 fn connectWithDeadline(fd: c_int, address: *const c.struct_sockaddr, length: c.socklen_t, deadline: Deadline) !void {
     if (c.connect(fd, address, length) == 0) return;
@@ -286,7 +299,8 @@ fn sendAll(fd: c_int, bytes: []const u8, deadline: Deadline) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         try waitFor(fd, c.POLLOUT, deadline);
-        const sent = c.send(fd, bytes[offset..].ptr, bytes.len - offset, 0);
+        const sent = c.send(fd, bytes[offset..].ptr, bytes.len - offset, c.MSG_NOSIGNAL);
+        if (sent < 0 and std.posix.errno(sent) == .INTR) continue;
         if (sent <= 0) return error.SendFailed;
         offset += @intCast(sent);
     }

@@ -19,6 +19,7 @@ const c = @cImport({
     @cInclude("spawn.h");
     @cInclude("fcntl.h");
     @cInclude("sys/wait.h");
+    @cInclude("sys/random.h");
     @cInclude("sqlite3.h");
 });
 const Config = struct { opnsense_url: []const u8, allow_insecure_http: bool = false, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, metrics_enabled: bool = true, metrics_host: []const u8 = "127.0.0.1", metrics_port: u16 = 9108, dns_servers: []const []const u8 = &.{}, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
@@ -26,6 +27,9 @@ const Secrets = struct { api_key: ?[]const u8 = null, apik_key: ?[]const u8 = nu
 const max_pending_events = 512;
 const max_accepts_per_iteration = 8;
 const lease_request_timeout_ms = 1000;
+const max_config_seconds: i64 = 86_400;
+const max_lease_lifetime_seconds: i64 = 31_536_000;
+const max_backoff_milliseconds: i64 = 3_600_000;
 const PendingEvent = struct { body: []u8, hostname: []u8 };
 const LoadedConfiguration = struct { config: Config, key: []const u8, secret: []const u8 };
 const Runtime = struct { config: Config, key: []const u8, secret: []const u8, db: *c.sqlite3, io: std.Io, started_at: i64, api_worker_fd: c_int = -1, api_worker_pid: c_int = -1, reconfigure_due: ?i64 = null, health_due: i64 = 0, reconcile_due: i64 = 0, health_backoff_ms: i64 = 100, lease_events: u64 = 0, api_calls: u64 = 0, api_get_calls: u64 = 0, api_post_calls: u64 = 0, api_failures: u64 = 0, reconfigures: u64 = 0, health_checks: u64 = 0, health_failures: u64 = 0 };
@@ -89,6 +93,9 @@ const MetricsHandler = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    // A disconnected hook or worker must turn a write into a recoverable error,
+    // never terminate the manager (or an exec-isolated worker) with SIGPIPE.
+    _ = c.signal(c.SIGPIPE, c.SIG_IGN);
     const options = (try parseCommand(init)) orelse {
         try printHelp(init);
         return;
@@ -158,7 +165,7 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
     logConfiguration(&runtime.config, false);
     healthCheck(&runtime, true);
     reconcile(&runtime) catch |err| common.log(.WARN, "startup OPNsense reconciliation failed: {t}", .{err});
-    runtime.reconcile_due = nowSeconds() + runtime.config.reconcile_seconds;
+    runtime.reconcile_due = addSeconds(nowSeconds(), runtime.config.reconcile_seconds);
     validateDnsState(&runtime);
     while (true) {
         if (shutdown_requested.load(.acquire) != 0) {
@@ -251,7 +258,7 @@ fn validateConfig(config: *const Config) !void {
     const http = std.mem.startsWith(u8, config.opnsense_url, "http://");
     if (!https and !http) return error.InvalidOpnsenseUrl;
     if (http and !config.allow_insecure_http) return error.InsecureHttpDisabled;
-    if (config.record_ttl_seconds <= 0 or config.reconcile_seconds <= 0 or config.queue_max_events == 0 or config.queue_max_events > max_pending_events or config.throttle_seconds < 0 or config.health_check_seconds <= 0 or config.initial_backoff_ms <= 0 or config.max_backoff_ms < config.initial_backoff_ms or config.api_timeout_seconds <= 0 or config.api_timeout_seconds > 3600 or config.api_test_timeout_seconds <= 0 or config.api_test_timeout_seconds > 3600 or config.metrics_port == 0) return error.InvalidTimerConfiguration;
+    if (config.record_ttl_seconds <= 0 or config.record_ttl_seconds > max_config_seconds or config.reconcile_seconds <= 0 or config.reconcile_seconds > max_config_seconds or config.queue_max_events == 0 or config.queue_max_events > max_pending_events or config.throttle_seconds < 0 or config.throttle_seconds > max_config_seconds or config.health_check_seconds <= 0 or config.health_check_seconds > max_config_seconds or config.initial_backoff_ms <= 0 or config.initial_backoff_ms > max_backoff_milliseconds or config.max_backoff_ms < config.initial_backoff_ms or config.max_backoff_ms > max_backoff_milliseconds or config.api_timeout_seconds <= 0 or config.api_timeout_seconds > 3600 or config.api_test_timeout_seconds <= 0 or config.api_test_timeout_seconds > 3600 or config.metrics_port == 0) return error.InvalidTimerConfiguration;
     if (!std.mem.eql(u8, config.metrics_host, "127.0.0.1") and !std.mem.eql(u8, config.metrics_host, "0.0.0.0")) return error.InvalidMetricsHost;
     if (std.mem.eql(u8, config.listen_type, "unix")) {
         if (config.socket_path.len == 0 or config.socket_path.len >= 108) return error.InvalidSocketPath;
@@ -275,6 +282,9 @@ fn logConfiguration(config: *const Config, debug: bool) void {
 fn logMetrics(r: *const Runtime) void {
     common.log(.INFO, "metrics: runtime={d}s lease_events={d} api_calls={d} get={d} post={d} api_failures={d} health_checks={d} health_failures={d} reconfigures={d}", .{ nowSeconds() - r.started_at, r.lease_events, r.api_calls, r.api_get_calls, r.api_post_calls, r.api_failures, r.health_checks, r.health_failures, r.reconfigures });
 }
+fn addSeconds(base: i64, duration: i64) i64 {
+    return std.math.add(i64, base, duration) catch std.math.maxInt(i64);
+}
 fn loadRuntime(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOptions) !Runtime {
     const loaded = try loadConfiguration(init, allocator, options);
     const db_path = try allocator.dupeZ(u8, loaded.config.db_path);
@@ -292,9 +302,9 @@ fn loadConfiguration(init: std.process.Init, allocator: std.mem.Allocator, optio
     const secrets_path = options.secrets_path orelse init.minimal.environ.getPosix("LEASELINKD_SECRETS") orelse "/etc/leaselinkd/secrets.json";
     const cb = try std.Io.Dir.cwd().readFileAlloc(init.io, config_path, allocator, .limited(128 * 1024));
     const sb = try std.Io.Dir.cwd().readFileAlloc(init.io, secrets_path, allocator, .limited(128 * 1024));
-    const config = try std.json.parseFromSliceLeaky(Config, allocator, cb, .{ .ignore_unknown_fields = true });
+    const config = try std.json.parseFromSliceLeaky(Config, allocator, cb, .{});
     if (!options.loglevel_set) if (config.loglevel) |level| try common.setLogLevel(level);
-    const secrets = try std.json.parseFromSliceLeaky(Secrets, allocator, sb, .{ .ignore_unknown_fields = true });
+    const secrets = try std.json.parseFromSliceLeaky(Secrets, allocator, sb, .{});
     const key = secrets.api_key orelse secrets.apik_key orelse return error.MissingApiKey;
     const secret = secrets.api_secret orelse secrets.apikey_secret orelse return error.MissingApiSecret;
     return .{ .config = config, .key = key, .secret = secret };
@@ -429,17 +439,20 @@ fn buildDnsQuery(query: []u8, id: u16, hostname: []const u8, domain: []const u8)
     return query_len;
 }
 fn parseDnsReply(query: []const u8, bytes: []const u8, wanted: [4]u8) !DnsAnswer {
-    if (query.len < 2 or bytes.len < 12) return error.InvalidDnsReply;
+    if (query.len < 12 or bytes.len < 12) return error.InvalidDnsReply;
     if (bytes[0] != query[0] or bytes[1] != query[1]) return error.DnsLookupFailed;
+    if ((bytes[2] & 0x80) == 0 or (bytes[2] & 0x78) != 0 or (bytes[2] & 0x02) != 0) return error.InvalidDnsReply;
     var index: usize = 4;
     const questions = try readU16(bytes, &index);
     const answers = try readU16(bytes, &index);
+    if (questions != 1) return error.InvalidDnsReply;
     index = 12;
     for (0..questions) |_| {
         try skipDnsName(bytes, &index);
         index += 4;
         if (index > bytes.len) return error.InvalidDnsReply;
     }
+    if (!std.mem.eql(u8, bytes[12..index], query[12..])) return error.DnsLookupFailed;
     var result = DnsAnswer{ .rcode = @truncate(bytes[3] & 0x0f) };
     if (result.rcode != 0) return result;
     for (0..answers) |_| {
@@ -466,14 +479,19 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
     defer std.heap.page_allocator.free(ip_z);
     if (c.inet_pton(c.AF_INET, ip_z.ptr, &wanted) != 1) return error.InvalidLeaseAddress;
     var query: [512]u8 = undefined;
-    const id: u16 = @truncate(@as(u64, @intCast(nowSeconds())));
+    var id: u16 = undefined;
+    if (c.getrandom(&id, @sizeOf(u16), 0) != @sizeOf(u16)) return error.DnsRandomFailed;
     const query_len = try buildDnsQuery(&query, id, hostname, domain);
     const fd = c.socket(c.AF_INET, c.SOCK_DGRAM, 0);
     if (fd < 0) return error.DnsSocketFailed;
     defer _ = c.close(fd);
-    if (c.sendto(fd, &query, query_len, 0, .{ .__sockaddr_in__ = &address }, @sizeOf(c.struct_sockaddr_in)) < 0) return error.DnsSendFailed;
+    if (c.connect(fd, .{ .__sockaddr_in__ = &address }, @sizeOf(c.struct_sockaddr_in)) != 0) return error.DnsConnectFailed;
+    if (c.send(fd, &query, query_len, c.MSG_NOSIGNAL) < 0) return error.DnsSendFailed;
     var ready = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
-    if (c.poll(&ready, 1, 2000) <= 0) return error.DnsTimeout;
+    while (c.poll(&ready, 1, 2000) < 0) {
+        if (std.posix.errno(-1) != .INTR) return error.DnsPollFailed;
+    }
+    if ((ready.revents & c.POLLIN) == 0) return error.DnsTimeout;
     var reply: [2048]u8 = undefined;
     const received = c.recv(fd, &reply, reply.len, 0);
     if (received < 12) return error.InvalidDnsReply;
@@ -527,6 +545,18 @@ test "DNS resolver rejects truncated replies" {
     reply[1] = query[1];
     reply[5] = 1;
     try std.testing.expectError(error.InvalidDnsReply, parseDnsReply(query[0..query_len], &reply, .{ 10, 12, 1, 81 }));
+}
+test "DNS resolver rejects replies without its matching question" {
+    var query: [512]u8 = undefined;
+    const query_len = try buildDnsQuery(&query, 0x1234, "ranos", "ashbyte.com");
+    var reply: [512]u8 = undefined;
+    @memcpy(reply[0..query_len], query[0..query_len]);
+    reply[2] = 0x01; // Not a response (QR is clear).
+    reply[3] = 0x80;
+    try std.testing.expectError(error.InvalidDnsReply, parseDnsReply(query[0..query_len], reply[0..query_len], .{ 10, 12, 1, 81 }));
+    reply[2] = 0x81;
+    reply[13] = 'x'; // A matching transaction ID alone is insufficient.
+    try std.testing.expectError(error.DnsLookupFailed, parseDnsReply(query[0..query_len], reply[0..query_len], .{ 10, 12, 1, 81 }));
 }
 
 test "lease Content-Length parsing rejects ambiguous and unsafe framing" {
@@ -618,7 +648,7 @@ fn serviceTimers(r: *Runtime) void {
         common.log(.TRACE, "reconciliation work arena begin", .{});
         reconcileWithAllocator(r, allocator) catch |err| common.log(.WARN, "OPNsense reconciliation failed: {t}", .{err});
         common.log(.TRACE, "reconciliation work arena release", .{});
-        r.reconcile_due = now + r.config.reconcile_seconds;
+        r.reconcile_due = addSeconds(now, r.config.reconcile_seconds);
     }
     if (r.reconfigure_due) |due| if (now >= due) {
         common.log(.TRACE, "reconfigure work arena begin", .{});
@@ -658,11 +688,11 @@ fn forceResync(r: *Runtime) void {
         common.log(.WARN, "requested OPNsense resync failed: {t}", .{err});
         return;
     };
-    r.reconcile_due = nowSeconds() + r.config.reconcile_seconds;
+    r.reconcile_due = addSeconds(nowSeconds(), r.config.reconcile_seconds);
     common.log(.INFO, "requested SQLite-to-OPNsense resync queued durable records", .{});
 }
 fn requestReconfigure(r: *Runtime) !void {
-    const due = nowSeconds() + @max(@as(i64, 0), r.config.throttle_seconds);
+    const due = addSeconds(nowSeconds(), @max(@as(i64, 0), r.config.throttle_seconds));
     r.reconfigure_due = if (r.reconfigure_due) |existing| @min(existing, due) else due;
     try persistReconfigureDue(r.db, r.reconfigure_due.?);
     common.log(.DEBUG, "reconfigure scheduled for {d}", .{r.reconfigure_due.?});
@@ -680,7 +710,7 @@ fn healthCheckWithAllocator(r: *Runtime, allocator: std.mem.Allocator, startup: 
     common.log(.DEBUG, "checking OPNsense health", .{});
     if (apiGet(r, allocator, "/service/status")) |response| {
         r.health_backoff_ms = r.config.initial_backoff_ms;
-        r.health_due = nowSeconds() + @max(@as(i64, 1), r.config.health_check_seconds);
+        r.health_due = addSeconds(nowSeconds(), @max(@as(i64, 1), r.config.health_check_seconds));
         if (startup) {
             const Status = struct { status: ?[]const u8 = null };
             const status = std.json.parseFromSlice(Status, allocator, response, .{ .ignore_unknown_fields = true }) catch null;
@@ -696,7 +726,7 @@ fn healthCheckWithAllocator(r: *Runtime, allocator: std.mem.Allocator, startup: 
         prometheus.healthFailure();
         const delay = @max(@as(i64, 1), @divTrunc(r.health_backoff_ms + 999, 1000));
         common.log(.WARN, "OPNsense health check failed: {t}; retrying in {d}s", .{ err, delay });
-        r.health_due = nowSeconds() + delay;
+        r.health_due = addSeconds(nowSeconds(), delay);
         r.health_backoff_ms = @min(r.health_backoff_ms * 2, r.config.max_backoff_ms);
     }
 }
@@ -775,7 +805,7 @@ fn processConnection(fd: c_int, r: *Runtime) !void {
         };
         r.lease_events += 1;
         prometheus.leaseAccepted();
-        common.log(.INFO, "persisted lease event={s} host={s} ip={s}", .{ event.event, event.lease.hostname, event.lease.@"ip-address" });
+        common.log(.DEBUG, "persisted lease event={s} host={s} ip={s}", .{ event.event, event.lease.hostname, event.lease.@"ip-address" });
         return respond(fd, 202);
     }
     prometheus.leaseRejected();
@@ -820,7 +850,8 @@ fn persistDesired(r: *Runtime, allocator: std.mem.Allocator, event: common.Event
     const present = !common.isRemovalEvent(event.event);
     if (present) if (previous_ip) |old_ip| if (!std.mem.eql(u8, old_ip, event.lease.@"ip-address")) common.log(.INFO, "tracked lease IP changed: event={s} host={s} previous_ip={s} new_ip={s}", .{ event.event, event.lease.hostname, old_ip, event.lease.@"ip-address" });
     const lease_ttl = std.fmt.parseInt(i64, event.lease.@"valid-lifetime", 10) catch r.config.record_ttl_seconds;
-    const expires = nowSeconds() + @max(@as(i64, 1), if (present) lease_ttl else r.config.record_ttl_seconds);
+    const bounded_ttl = @min(max_lease_lifetime_seconds, @max(@as(i64, 1), if (present) lease_ttl else r.config.record_ttl_seconds));
+    const expires = addSeconds(nowSeconds(), bounded_ttl);
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(r.db, "INSERT INTO desired_overrides(hostname,owner_id,ip_address,present,expires_at,dirty,next_attempt,failures) VALUES(?,?,?,?,?,1,0,0) ON CONFLICT(hostname) DO UPDATE SET ip_address=excluded.ip_address,present=excluded.present,expires_at=excluded.expires_at,dirty=1,next_attempt=0,failures=0", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
@@ -965,6 +996,8 @@ fn reconcileWithAllocator(r: *Runtime, allocator: std.mem.Allocator) !void {
     const Reply = struct { rows: ?[]Remote = null };
     const response = try apiGet(r, allocator, "/settings/search_host_override");
     const reply = try std.json.parseFromSliceLeaky(Reply, allocator, response, .{ .ignore_unknown_fields = true });
+    try sql(r.db, "CREATE TEMP TABLE IF NOT EXISTS reconcile_seen(owner_id TEXT PRIMARY KEY);");
+    try sql(r.db, "DELETE FROM reconcile_seen;");
     for (reply.rows orelse &.{}) |remote| {
         const uuid = remote.uuid orelse continue;
         const description = remote.description orelse continue;
@@ -972,16 +1005,25 @@ fn reconcileWithAllocator(r: *Runtime, allocator: std.mem.Allocator) !void {
         const suffix = description[marker + "; leaselinkd:".len ..];
         const colon = std.mem.lastIndexOfScalar(u8, suffix, ':') orelse continue;
         const owner = suffix[colon + 1 ..];
-        if (!(try reconcileOwner(r.db, owner, uuid))) {
+        if (try reconcileOwner(r.db, owner, uuid)) {
+            try markReconcileSeen(r.db, owner);
+        } else {
             const endpoint = try std.fmt.allocPrint(allocator, "/settings/del_host_override/{s}", .{uuid});
             _ = try apiPost(r, allocator, endpoint, "{}");
             try requestReconfigure(r);
             common.log(.INFO, "reconciliation removed stale managed override uuid={s}", .{uuid});
         }
     }
-    // Reassert desired state after pruning. This repairs manually deleted remote
-    // entries and any uncertain timeout without trusting an incomplete search row.
-    try sql(r.db, "UPDATE desired_overrides SET dirty=1,next_attempt=0 WHERE present=1");
+    // Only reapply desired records that are absent from the remote inventory.
+    // Existing backoff and failure state is deliberately preserved.
+    try sql(r.db, "UPDATE desired_overrides SET dirty=1,next_attempt=0 WHERE present=1 AND owner_id NOT IN (SELECT owner_id FROM reconcile_seen);");
+}
+fn markReconcileSeen(db: *c.sqlite3, owner: []const u8) !void {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO reconcile_seen(owner_id) VALUES(?)", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
+    defer _ = c.sqlite3_finalize(stmt);
+    if (c.sqlite3_bind_text(stmt, 1, owner.ptr, @intCast(owner.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
+    if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn reconcileOwner(db: *c.sqlite3, owner: []const u8, remote_uuid: []const u8) !bool {
     var stmt: ?*c.sqlite3_stmt = null;
@@ -1213,18 +1255,23 @@ fn monotonicMilliseconds() i64 {
     return @as(i64, ts.tv_sec) * 1000 + @divTrunc(@as(i64, ts.tv_nsec), 1_000_000);
 }
 fn waitFd(fd: c_int, events: c_short, deadline: i64) !void {
-    const remaining = deadline - monotonicMilliseconds();
-    if (remaining <= 0) return error.ApiTimeout;
-    var ready = c.struct_pollfd{ .fd = fd, .events = events, .revents = 0 };
-    const result = c.poll(&ready, 1, @intCast(@min(remaining, std.math.maxInt(c_int))));
-    if (result == 0) return error.ApiTimeout;
-    if (result < 0 or (ready.revents & (c.POLLERR | c.POLLHUP | c.POLLNVAL)) != 0) return error.ApiWorkerFailed;
+    while (true) {
+        const remaining = deadline - monotonicMilliseconds();
+        if (remaining <= 0) return error.ApiTimeout;
+        var ready = c.struct_pollfd{ .fd = fd, .events = events, .revents = 0 };
+        const result = c.poll(&ready, 1, @intCast(@min(remaining, std.math.maxInt(c_int))));
+        if (result == 0) return error.ApiTimeout;
+        if (result < 0 and std.posix.errno(result) == .INTR) continue;
+        if (result < 0 or (ready.revents & (c.POLLERR | c.POLLHUP | c.POLLNVAL)) != 0) return error.ApiWorkerFailed;
+        return;
+    }
 }
 fn writeFdUntil(fd: c_int, bytes: []const u8, deadline: i64) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         try waitFd(fd, c.POLLOUT, deadline);
         const written = c.write(fd, bytes[offset..].ptr, bytes.len - offset);
+        if (written < 0 and std.posix.errno(written) == .INTR) continue;
         if (written <= 0) return error.ApiWorkerFailed;
         offset += @intCast(written);
     }
@@ -1234,6 +1281,7 @@ fn readFdUntil(fd: c_int, bytes: []u8, deadline: i64) !void {
     while (offset < bytes.len) {
         try waitFd(fd, c.POLLIN, deadline);
         const received = c.read(fd, bytes[offset..].ptr, bytes.len - offset);
+        if (received < 0 and std.posix.errno(received) == .INTR) continue;
         if (received <= 0) return error.ApiWorkerFailed;
         offset += @intCast(received);
     }

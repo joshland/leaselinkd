@@ -38,7 +38,19 @@ const Metrics = struct {
 
 var metrics = m.initializeNoop(Metrics);
 var api_worker_pid = std.atomic.Value(c_int).init(-1);
+// metrics.zig CounterVec updates atomically but renders counter storage through
+// a non-atomic read. Serialize this application's updates and scrapes until the
+// upstream dependency can provide an atomic rendering primitive.
+var metrics_mutex: std.Io.Mutex = .init;
+var metrics_io: ?std.Io = null;
+fn lockMetrics() void {
+    if (metrics_io) |io| metrics_mutex.lockUncancelable(io);
+}
+fn unlockMetrics() void {
+    if (metrics_io) |io| metrics_mutex.unlock(io);
+}
 pub fn initialize(allocator: std.mem.Allocator, io: std.Io) !void {
+    metrics_io = io;
     metrics = .{
         .lease_events = m.Counter(u64).init("lease_events_total", .{ .help = "Accepted Kea lease events persisted to SQLite." }, .{ .prefix = "leaselinkd_" }),
         .lease_rejections = m.Counter(u64).init("lease_event_rejections_total", .{ .help = "Rejected lease-event requests." }, .{ .prefix = "leaselinkd_" }),
@@ -66,25 +78,39 @@ pub fn initialize(allocator: std.mem.Allocator, io: std.Io) !void {
 }
 
 pub fn leaseAccepted() void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.lease_events.incr();
 }
 pub fn leaseRejected() void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.lease_rejections.incr();
 }
 pub fn leaseRequestDuration(milliseconds: u64) void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.lease_server_latency_ms.observe(milliseconds);
 }
 pub fn reconfigured() void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.reconfigures.incr();
 }
 pub fn healthCheck() void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.health_checks.incr();
 }
 pub fn healthFailure() void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.health_failures.incr();
 }
 
 pub fn apiRequest(method: []const u8, request_bytes: usize, elapsed_ms: u64, response_bytes: usize, succeeded: bool) void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.api_requests.incr(.{ .method = method }) catch {};
     metrics.api_request_bytes.incrBy(.{ .method = method }, @intCast(request_bytes)) catch {};
     metrics.api_response_bytes.incrBy(.{ .method = method }, @intCast(response_bytes)) catch {};
@@ -92,6 +118,8 @@ pub fn apiRequest(method: []const u8, request_bytes: usize, elapsed_ms: u64, res
     if (!succeeded) metrics.api_failures.incr(.{ .method = method }) catch {};
 }
 pub fn apiWorkerRequest(method: []const u8, elapsed_ms: u64, succeeded: bool) void {
+    lockMetrics();
+    defer unlockMetrics();
     metrics.api_worker_requests.incr(.{ .method = method }) catch {};
     metrics.api_worker_request_latency_ms.observe(.{ .method = method }, elapsed_ms) catch {};
     if (!succeeded) metrics.api_worker_failures.incr(.{ .method = method }) catch {};
@@ -104,6 +132,8 @@ pub fn apiWorkerStopped() void {
 }
 
 pub fn write(writer: *std.Io.Writer) !void {
+    lockMetrics();
+    defer unlockMetrics();
     sampleProcess();
     try m.write(&metrics, writer);
 }

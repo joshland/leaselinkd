@@ -119,13 +119,16 @@ python3 tests/burst_lease_events.py "$tmp/unbound.sock" 32 burst
 for _ in $(seq 1 600); do test "$(sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM overrides')" -eq 33 && break; sleep 0.05; done
 test "$(sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM overrides')" -eq 33
 test "$(grep -c 'POST /api/unbound/settings/add_host_override' "$tmp/opnsense.log")" -eq 35
-# The manager's startup health check and all subsequent API calls share one HTTP/1.1 worker connection.
-test "$(sed -n 's/.* peer=\([0-9][0-9]*\) body=.*/\1/p' "$tmp/opnsense.log" | sort -u | wc -l | tr -d ' ')" -eq 1
+# The initial worker reuses one HTTP/1.1 connection; the intentional worker-kill
+# regression creates exactly one replacement connection.
+test "$(sed -n 's/.* peer=\([0-9][0-9]*\) body=.*/\1/p' "$tmp/opnsense.log" | sort -u | wc -l | tr -d ' ')" -eq 2
 env -u KEA_LEASE4_HOSTNAME KEA_LEASE4_ADDRESS=192.0.2.61 "$hook" --config "$tmp/hook.json" lease4_renew >"$tmp/hostname-less-renew.log" 2>&1
 grep -q 'hostname-less lease4_renew deferred' "$tmp/hostname-less-renew.log"
 LEASES4_SIZE=1 LEASES4_AT0_HOSTNAME=batchhost LEASES4_AT0_ADDRESS=192.0.2.70 LEASES4_AT0_HWADDR=00:11:22:33:44:77 LEASES4_AT0_VALID_LIFETIME=3600 "$hook" --config "$tmp/hook.json" leases4_committed
 for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='batchhost'" | grep -qx 192.0.2.70 && break; sleep 0.05; done
 sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='batchhost'" | grep -qx 192.0.2.70
+if LEASES4_SIZE=257 "$hook" --config "$tmp/hook.json" leases4_committed >"$tmp/oversized-batch.log" 2>&1; then exit 1; fi
+grep -q 'BatchTooLarge' "$tmp/oversized-batch.log"
 if KEA_LEASELINK_CONFIG="$tmp/hook.json" KEA_LEASE4_HOSTNAME=loopback KEA_LEASE4_ADDRESS=127.0.0.1 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --loglevel DEBUG lease4_committed >"$tmp/loopback.log" 2>&1; then exit 1; fi
 grep -q 'invalid or loopback IPv4 lease address' "$tmp/loopback.log"
 test "$(grep -c 'settings/add_host_override' "$tmp/opnsense.log")" -eq 36

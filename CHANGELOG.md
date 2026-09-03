@@ -4,6 +4,26 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Completed the remaining SAFETY hardening work: configuration files now reject
+  unknown fields; manager and hook socket I/O retry interrupted operations and
+  ignore SIGPIPE; normal lease-success logs are DEBUG rather than per-event
+  INFO noise; and timer/TTL inputs have practical caps with saturating durable
+  expiry arithmetic.
+- Hardened DNS validation with kernel-generated transaction IDs, a connected
+  UDP resolver socket, and response checks for QR/opcode/truncation and the
+  original single question. Added regression coverage for a misassociated DNS
+  reply.
+- Capped `leases4_committed` batches at 256 records. A batch shares one
+  monotonic hook deadline and continues with later valid records after an
+  individual transmission failure.
+- Reconciliation now records the remote owned-record inventory and queues only
+  desired records missing from it, preserving normal retry backoff. Metrics
+  mutation and rendering are serialized around the current dependency's
+  non-atomic CounterVec rendering path.
+- Added an integration regression that kills the exec-isolated API worker,
+  verifies a lease triggers a replacement worker, and scrapes its availability
+  metric.
+
 - Made SQLite reads fail closed: bind and step failures are no longer treated
   as missing lease state, so reconciliation will not delete a remote managed
   override when local ownership is uncertain. Desired/legacy ledger updates
