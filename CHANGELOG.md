@@ -4,6 +4,11 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Expanded Prometheus process observability for the exec-isolated OPNsense API
+  worker with user/system CPU-time gauges and a worker-start counter. Reworked
+  the Grafana dashboard into Overview, Lease intake, Resources, API worker,
+  and OPNsense service/diagnostics rows, explicitly separating manager and
+  worker CPU and memory.
 - Completed the remaining SAFETY hardening work: configuration files now reject
   unknown fields; manager and hook socket I/O retry interrupted operations and
   ignore SIGPIPE; normal lease-success logs are DEBUG rather than per-event

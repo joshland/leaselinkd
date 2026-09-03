@@ -72,13 +72,13 @@ LEASELINKD_CONFIG="$tmp/config.json" LEASELINKD_SECRETS="$tmp/secrets.json" "$ma
 manager_pid=$!
 for _ in $(seq 1 50); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 [ -S "$tmp/unbound.sock" ]
-grep -q 'leaselinkd v3.0.4 starting; architecture=' "$tmp/manager.log"
+grep -q 'leaselinkd v3.0.5 starting; architecture=' "$tmp/manager.log"
 grep -q 'config: api=' "$tmp/manager.log"
 for _ in $(seq 1 100); do grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log" && break; sleep 0.05; done
 grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
 for _ in $(seq 1 50); do python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()" && break; sleep 0.05; done
 python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()"
-python3 -c "import urllib.request; body=urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read(); assert b'leaselinkd_opnsense_api_worker_up 1' in body; assert b'leaselinkd_opnsense_api_worker_resident_memory_bytes ' in body"
+python3 -c "import urllib.request; body=urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read(); assert b'leaselinkd_opnsense_api_worker_up 1' in body; assert b'leaselinkd_opnsense_api_worker_starts_total 1' in body; assert b'leaselinkd_opnsense_api_worker_cpu_user_seconds ' in body; assert b'leaselinkd_opnsense_api_worker_cpu_system_seconds ' in body; assert b'leaselinkd_opnsense_api_worker_resident_memory_bytes ' in body"
 
 KEA_LEASE4_HOSTNAME=printer KEA_LEASE4_ADDRESS=192.0.2.50 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --config "$tmp/hook.json" --loglevel DEBUG lease4_committed >"$tmp/hook-add.log" 2>&1
 grep -q 'lease operation complete: event=lease4_committed manager_api=passed' "$tmp/hook-add.log"

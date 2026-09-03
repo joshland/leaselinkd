@@ -4,6 +4,7 @@ const m = @import("metrics");
 const c = @cImport({
     @cInclude("stdio.h");
     @cInclude("sys/resource.h");
+    @cInclude("unistd.h");
 });
 
 const Metrics = struct {
@@ -27,6 +28,9 @@ const Metrics = struct {
     process_virtual_memory_bytes: m.Gauge(u64),
     api_worker_up: m.Gauge(u64),
     api_worker_pid: m.Gauge(u64),
+    api_worker_starts: m.Counter(u64),
+    api_worker_cpu_user_seconds: m.Gauge(f64),
+    api_worker_cpu_system_seconds: m.Gauge(f64),
     api_worker_resident_memory_bytes: m.Gauge(u64),
     api_worker_virtual_memory_bytes: m.Gauge(u64),
 
@@ -72,6 +76,9 @@ pub fn initialize(allocator: std.mem.Allocator, io: std.Io) !void {
         .process_virtual_memory_bytes = m.Gauge(u64).init("process_virtual_memory_bytes", .{ .help = "Current process virtual memory in bytes." }, .{ .prefix = "leaselinkd_" }),
         .api_worker_up = m.Gauge(u64).init("opnsense_api_worker_up", .{ .help = "Whether the isolated OPNsense API worker is running." }, .{ .prefix = "leaselinkd_" }),
         .api_worker_pid = m.Gauge(u64).init("opnsense_api_worker_pid", .{ .help = "PID of the isolated OPNsense API worker, or zero when absent." }, .{ .prefix = "leaselinkd_" }),
+        .api_worker_starts = m.Counter(u64).init("opnsense_api_worker_starts_total", .{ .help = "Isolated OPNsense API worker starts." }, .{ .prefix = "leaselinkd_" }),
+        .api_worker_cpu_user_seconds = m.Gauge(f64).init("opnsense_api_worker_cpu_user_seconds", .{ .help = "Isolated OPNsense API worker user CPU time in seconds." }, .{ .prefix = "leaselinkd_" }),
+        .api_worker_cpu_system_seconds = m.Gauge(f64).init("opnsense_api_worker_cpu_system_seconds", .{ .help = "Isolated OPNsense API worker system CPU time in seconds." }, .{ .prefix = "leaselinkd_" }),
         .api_worker_resident_memory_bytes = m.Gauge(u64).init("opnsense_api_worker_resident_memory_bytes", .{ .help = "Current isolated OPNsense API worker resident memory in bytes." }, .{ .prefix = "leaselinkd_" }),
         .api_worker_virtual_memory_bytes = m.Gauge(u64).init("opnsense_api_worker_virtual_memory_bytes", .{ .help = "Current isolated OPNsense API worker virtual memory in bytes." }, .{ .prefix = "leaselinkd_" }),
     };
@@ -126,6 +133,9 @@ pub fn apiWorkerRequest(method: []const u8, elapsed_ms: u64, succeeded: bool) vo
 }
 pub fn apiWorkerStarted(pid: c_int) void {
     api_worker_pid.store(pid, .release);
+    lockMetrics();
+    defer unlockMetrics();
+    metrics.api_worker_starts.incr();
 }
 pub fn apiWorkerStopped() void {
     api_worker_pid.store(-1, .release);
@@ -161,29 +171,71 @@ fn sampleProcess() void {
 fn sampleWorker(page_size: u64) void {
     const pid = api_worker_pid.load(.acquire);
     if (pid <= 0) {
-        metrics.api_worker_up.set(0);
-        metrics.api_worker_pid.set(0);
-        metrics.api_worker_resident_memory_bytes.set(0);
-        metrics.api_worker_virtual_memory_bytes.set(0);
+        clearWorkerMetrics();
         return;
     }
     var path: [64:0]u8 = undefined;
     const path_z = std.fmt.bufPrintZ(&path, "/proc/{d}/statm", .{pid}) catch return;
     const statm_file = c.fopen(path_z.ptr, "r") orelse {
-        metrics.api_worker_up.set(0);
+        clearWorkerMetrics();
         return;
     };
     defer _ = c.fclose(statm_file);
     var statm: [128]u8 = undefined;
     const read = c.fread(&statm, 1, statm.len, statm_file);
-    if (read == 0) return;
+    if (read == 0) {
+        clearWorkerMetrics();
+        return;
+    }
     var fields = std.mem.tokenizeAny(u8, statm[0..read], " \n");
-    const virtual_pages = std.fmt.parseInt(u64, fields.next() orelse return, 10) catch return;
-    const resident_pages = std.fmt.parseInt(u64, fields.next() orelse return, 10) catch return;
+    const virtual_pages = std.fmt.parseInt(u64, fields.next() orelse return, 10) catch {
+        clearWorkerMetrics();
+        return;
+    };
+    const resident_pages = std.fmt.parseInt(u64, fields.next() orelse return, 10) catch {
+        clearWorkerMetrics();
+        return;
+    };
+    sampleWorkerCpu(pid);
     metrics.api_worker_up.set(1);
     metrics.api_worker_pid.set(@intCast(pid));
     metrics.api_worker_virtual_memory_bytes.set(virtual_pages * page_size);
     metrics.api_worker_resident_memory_bytes.set(resident_pages * page_size);
+}
+
+fn sampleWorkerCpu(pid: c_int) void {
+    var path: [64:0]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path, "/proc/{d}/stat", .{pid}) catch return;
+    const stat_file = c.fopen(path_z.ptr, "r") orelse return;
+    defer _ = c.fclose(stat_file);
+    var stat: [1024]u8 = undefined;
+    const read = c.fread(&stat, 1, stat.len, stat_file);
+    const closing_paren = std.mem.lastIndexOfScalar(u8, stat[0..read], ')') orelse return;
+    var fields = std.mem.tokenizeAny(u8, stat[closing_paren + 1 .. read], " \n");
+    var field_index: usize = 0;
+    var user_ticks: ?u64 = null;
+    var system_ticks: ?u64 = null;
+    while (fields.next()) |field| : (field_index += 1) {
+        if (field_index == 11) user_ticks = std.fmt.parseInt(u64, field, 10) catch return;
+        if (field_index == 12) {
+            system_ticks = std.fmt.parseInt(u64, field, 10) catch return;
+            break;
+        }
+    }
+    const ticks_per_second = c.sysconf(c._SC_CLK_TCK);
+    if (ticks_per_second <= 0) return;
+    const ticks: f64 = @floatFromInt(ticks_per_second);
+    metrics.api_worker_cpu_user_seconds.set(@as(f64, @floatFromInt(user_ticks orelse return)) / ticks);
+    metrics.api_worker_cpu_system_seconds.set(@as(f64, @floatFromInt(system_ticks orelse return)) / ticks);
+}
+
+fn clearWorkerMetrics() void {
+    metrics.api_worker_up.set(0);
+    metrics.api_worker_pid.set(0);
+    metrics.api_worker_cpu_user_seconds.set(0);
+    metrics.api_worker_cpu_system_seconds.set(0);
+    metrics.api_worker_resident_memory_bytes.set(0);
+    metrics.api_worker_virtual_memory_bytes.set(0);
 }
 
 fn seconds(value: c.struct_timeval) f64 {
