@@ -284,7 +284,8 @@ fn loadRuntime(init: std.process.Init, allocator: std.mem.Allocator, options: Co
     try sql(db.?, "PRAGMA journal_mode=WAL;");
     try sql(db.?, "CREATE TABLE IF NOT EXISTS overrides (hostname TEXT PRIMARY KEY, uuid TEXT NOT NULL, ip_address TEXT NOT NULL);");
     try sql(db.?, "CREATE TABLE IF NOT EXISTS desired_overrides (hostname TEXT PRIMARY KEY, owner_id TEXT NOT NULL, ip_address TEXT NOT NULL, present INTEGER NOT NULL, expires_at INTEGER NOT NULL, uuid TEXT, dirty INTEGER NOT NULL DEFAULT 1, next_attempt INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0);");
-    return .{ .config = loaded.config, .key = loaded.key, .secret = loaded.secret, .db = db.?, .io = init.io, .started_at = nowSeconds(), .health_backoff_ms = loaded.config.initial_backoff_ms, .reconcile_due = nowSeconds() };
+    try sql(db.?, "CREATE TABLE IF NOT EXISTS manager_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL);");
+    return .{ .config = loaded.config, .key = loaded.key, .secret = loaded.secret, .db = db.?, .io = init.io, .started_at = nowSeconds(), .health_backoff_ms = loaded.config.initial_backoff_ms, .reconcile_due = nowSeconds(), .reconfigure_due = try persistedReconfigureDue(db.?) };
 }
 fn loadConfiguration(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOptions) !LoadedConfiguration {
     const config_path = options.config_path orelse init.minimal.environ.getPosix("LEASELINKD_CONFIG") orelse "/etc/leaselinkd/config.json";
@@ -544,6 +545,23 @@ test "production transport policy requires HTTPS and loopback TCP" {
     const remote_tcp = Config{ .opnsense_url = "https://opnsense.example/api/unbound", .listen_type = "tcp", .tcp_host = "0.0.0.0" };
     try std.testing.expectError(error.InsecureTcpConfiguration, validateConfig(&remote_tcp));
 }
+test "SQLite reconciliation ownership fails closed on local errors" {
+    var db: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_open(":memory:", &db));
+    defer _ = c.sqlite3_close(db);
+    try std.testing.expectError(error.SqliteFailed, reconcileOwner(db.?, "owner", "remote-uuid"));
+}
+test "SQLite persists and coalesces reconfigure intent" {
+    var db: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_open(":memory:", &db));
+    defer _ = c.sqlite3_close(db);
+    try sql(db.?, "CREATE TABLE manager_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL);");
+    try persistReconfigureDue(db.?, 90);
+    try persistReconfigureDue(db.?, 120);
+    try std.testing.expectEqual(@as(?i64, 90), try persistedReconfigureDue(db.?));
+    try clearReconfigureDue(db.?);
+    try std.testing.expectEqual(@as(?i64, null), try persistedReconfigureDue(db.?));
+}
 fn validateDnsRecord(r: *Runtime, hostname: []const u8, ip: []const u8, startup: bool) !bool {
     var matches = false;
     var fullname_buffer: [255]u8 = undefined;
@@ -608,12 +626,14 @@ fn serviceTimers(r: *Runtime) void {
         _ = apiPost(r, allocator, "/service/reconfigure", "{}") catch |err| {
             common.log(.ERROR, "Unbound reconfigure failed: {t}", .{err});
             r.reconfigure_due = now + 1;
+            persistReconfigureDue(r.db, r.reconfigure_due.?) catch |db_err| common.log(.ERROR, "could not persist reconfigure retry: {t}", .{db_err});
             common.log(.TRACE, "reconfigure work arena release after failure", .{});
             return serviceOneDesired(r, allocator, now);
         };
         r.reconfigures += 1;
         prometheus.reconfigured();
         r.reconfigure_due = null;
+        clearReconfigureDue(r.db) catch |err| common.log(.ERROR, "could not clear persisted reconfigure intent: {t}", .{err});
         common.log(.TRACE, "reconfigure work arena release", .{});
     };
     serviceOneDesired(r, allocator, now);
@@ -641,9 +661,10 @@ fn forceResync(r: *Runtime) void {
     r.reconcile_due = nowSeconds() + r.config.reconcile_seconds;
     common.log(.INFO, "requested SQLite-to-OPNsense resync queued durable records", .{});
 }
-fn requestReconfigure(r: *Runtime) void {
+fn requestReconfigure(r: *Runtime) !void {
     const due = nowSeconds() + @max(@as(i64, 0), r.config.throttle_seconds);
     r.reconfigure_due = if (r.reconfigure_due) |existing| @min(existing, due) else due;
+    try persistReconfigureDue(r.db, r.reconfigure_due.?);
     common.log(.DEBUG, "reconfigure scheduled for {d}", .{r.reconfigure_due.?});
 }
 fn healthCheck(r: *Runtime, startup: bool) void {
@@ -803,11 +824,7 @@ fn persistDesired(r: *Runtime, allocator: std.mem.Allocator, event: common.Event
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(r.db, "INSERT INTO desired_overrides(hostname,owner_id,ip_address,present,expires_at,dirty,next_attempt,failures) VALUES(?,?,?,?,?,1,0,0) ON CONFLICT(hostname) DO UPDATE SET ip_address=excluded.ip_address,present=excluded.present,expires_at=excluded.expires_at,dirty=1,next_attempt=0,failures=0", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, event.lease.hostname.ptr, @intCast(event.lease.hostname.len), c.SQLITE_TRANSIENT);
-    _ = c.sqlite3_bind_text(stmt, 2, owner.ptr, @intCast(owner.len), c.SQLITE_TRANSIENT);
-    _ = c.sqlite3_bind_text(stmt, 3, event.lease.@"ip-address".ptr, @intCast(event.lease.@"ip-address".len), c.SQLITE_TRANSIENT);
-    _ = c.sqlite3_bind_int(stmt, 4, if (present) 1 else 0);
-    _ = c.sqlite3_bind_int64(stmt, 5, expires);
+    if (c.sqlite3_bind_text(stmt, 1, event.lease.hostname.ptr, @intCast(event.lease.hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK or c.sqlite3_bind_text(stmt, 2, owner.ptr, @intCast(owner.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK or c.sqlite3_bind_text(stmt, 3, event.lease.@"ip-address".ptr, @intCast(event.lease.@"ip-address".len), c.SQLITE_TRANSIENT) != c.SQLITE_OK or c.sqlite3_bind_int(stmt, 4, if (present) 1 else 0) != c.SQLITE_OK or c.sqlite3_bind_int64(stmt, 5, expires) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn newOwnerId(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
@@ -825,17 +842,23 @@ fn ownerFor(db: *c.sqlite3, allocator: std.mem.Allocator, hostname: []const u8) 
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "SELECT owner_id FROM desired_overrides WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
-    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
-    return try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0)));
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
+    return switch (c.sqlite3_step(stmt)) {
+        c.SQLITE_ROW => try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0))),
+        c.SQLITE_DONE => null,
+        else => error.SqliteFailed,
+    };
 }
 fn desiredIpFor(db: *c.sqlite3, allocator: std.mem.Allocator, hostname: []const u8) !?[]const u8 {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "SELECT ip_address FROM desired_overrides WHERE hostname=? AND present=1", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
-    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
-    return try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0)));
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
+    return switch (c.sqlite3_step(stmt)) {
+        c.SQLITE_ROW => try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0))),
+        c.SQLITE_DONE => null,
+        else => error.SqliteFailed,
+    };
 }
 fn expireDesired(r: *Runtime) !void {
     try sql(r.db, "UPDATE desired_overrides SET present=0,dirty=1,next_attempt=0 WHERE present=1 AND expires_at <= strftime('%s','now')");
@@ -844,9 +867,12 @@ fn nextDesired(db: *c.sqlite3, allocator: std.mem.Allocator, now: i64) !?Desired
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "SELECT hostname,owner_id,ip_address,present,expires_at,uuid FROM desired_overrides WHERE dirty=1 AND next_attempt<=? ORDER BY next_attempt,hostname LIMIT 1", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_int64(stmt, 1, now);
-    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
-    return .{ .hostname = try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0))), .owner_id = try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 1))), .ip = try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 2))), .present = c.sqlite3_column_int(stmt, 3) != 0, .expires_at = c.sqlite3_column_int64(stmt, 4), .uuid = if (c.sqlite3_column_type(stmt, 5) == c.SQLITE_NULL) null else try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 5))) };
+    if (c.sqlite3_bind_int64(stmt, 1, now) != c.SQLITE_OK) return error.SqliteFailed;
+    return switch (c.sqlite3_step(stmt)) {
+        c.SQLITE_ROW => .{ .hostname = try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0))), .owner_id = try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 1))), .ip = try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 2))), .present = c.sqlite3_column_int(stmt, 3) != 0, .expires_at = c.sqlite3_column_int64(stmt, 4), .uuid = if (c.sqlite3_column_type(stmt, 5) == c.SQLITE_NULL) null else try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 5))) },
+        c.SQLITE_DONE => null,
+        else => error.SqliteFailed,
+    };
 }
 fn processDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !void {
     if (desired.present) try applyDesired(r, allocator, desired) else try removeDesired(r, allocator, desired);
@@ -875,53 +901,58 @@ fn applyDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !vo
     const endpoint = if (desired.uuid) |uuid| try std.fmt.allocPrint(allocator, "/settings/set_host_override/{s}", .{uuid}) else "/settings/add_host_override";
     const response = try apiPost(r, allocator, endpoint, body.written());
     const uuid = desired.uuid orelse try responseUuid(allocator, response);
+    try sql(r.db, "BEGIN IMMEDIATE");
+    errdefer sql(r.db, "ROLLBACK") catch {};
     try markApplied(r.db, desired.hostname, uuid);
     try store(r.db, desired.hostname, uuid, desired.ip);
-    requestReconfigure(r);
+    try requestReconfigure(r);
+    try sql(r.db, "COMMIT");
 }
 fn removeDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !void {
     if (desired.uuid) |uuid| {
         const endpoint = try std.fmt.allocPrint(allocator, "/settings/del_host_override/{s}", .{uuid});
         _ = try apiPost(r, allocator, endpoint, "{}");
-        requestReconfigure(r);
     }
+    try sql(r.db, "BEGIN IMMEDIATE");
+    errdefer sql(r.db, "ROLLBACK") catch {};
     try sqlDeleteDesired(r.db, desired.hostname);
     try delete(r.db, desired.hostname);
+    if (desired.uuid != null) try requestReconfigure(r);
+    try sql(r.db, "COMMIT");
 }
 fn markApplied(db: *c.sqlite3, hostname: []const u8, uuid: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET uuid=?,dirty=0,failures=0 WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, uuid.ptr, @intCast(uuid.len), c.SQLITE_TRANSIENT);
-    _ = c.sqlite3_bind_text(stmt, 2, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_bind_text(stmt, 1, uuid.ptr, @intCast(uuid.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK or c.sqlite3_bind_text(stmt, 2, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn markClean(db: *c.sqlite3, hostname: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET dirty=0,failures=0 WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn queueDesired(db: *c.sqlite3, hostname: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET dirty=1,next_attempt=0,failures=0 WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn scheduleRetry(db: *c.sqlite3, hostname: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "UPDATE desired_overrides SET dirty=1,failures=failures+1,next_attempt=strftime('%s','now') + MIN(300, 1 << MIN(8,failures)) WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn sqlDeleteDesired(db: *c.sqlite3, hostname: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "DELETE FROM desired_overrides WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn reconcile(r: *Runtime) !void {
@@ -944,7 +975,7 @@ fn reconcileWithAllocator(r: *Runtime, allocator: std.mem.Allocator) !void {
         if (!(try reconcileOwner(r.db, owner, uuid))) {
             const endpoint = try std.fmt.allocPrint(allocator, "/settings/del_host_override/{s}", .{uuid});
             _ = try apiPost(r, allocator, endpoint, "{}");
-            requestReconfigure(r);
+            try requestReconfigure(r);
             common.log(.INFO, "reconciliation removed stale managed override uuid={s}", .{uuid});
         }
     }
@@ -956,8 +987,10 @@ fn reconcileOwner(db: *c.sqlite3, owner: []const u8, remote_uuid: []const u8) !b
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "SELECT hostname,uuid FROM desired_overrides WHERE owner_id=? AND present=1", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, owner.ptr, @intCast(owner.len), c.SQLITE_TRANSIENT);
-    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return false;
+    if (c.sqlite3_bind_text(stmt, 1, owner.ptr, @intCast(owner.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
+    const result = c.sqlite3_step(stmt);
+    if (result == c.SQLITE_DONE) return false;
+    if (result != c.SQLITE_ROW) return error.SqliteFailed;
     const hostname = std.mem.span(c.sqlite3_column_text(stmt, 0));
     if (c.sqlite3_column_type(stmt, 1) == c.SQLITE_NULL) {
         try markApplied(db, hostname, remote_uuid);
@@ -982,14 +1015,14 @@ fn upsert(r: *Runtime, allocator: std.mem.Allocator, lease: common.Lease) !void 
     const response = try apiPost(r, allocator, endpoint, body.written());
     const uuid = if (old) |value| value else try responseUuid(allocator, response);
     try store(r.db, lease.hostname, uuid, lease.@"ip-address");
-    requestReconfigure(r);
+    try requestReconfigure(r);
 }
 fn remove(r: *Runtime, allocator: std.mem.Allocator, hostname: []const u8) !void {
     const uuid = (try lookup(r.db, allocator, hostname)) orelse return;
     const endpoint = try std.fmt.allocPrint(allocator, "/settings/del_host_override/{s}", .{uuid});
     _ = try apiPost(r, allocator, endpoint, "{}");
     try delete(r.db, hostname);
-    requestReconfigure(r);
+    try requestReconfigure(r);
 }
 fn apiPost(r: *Runtime, allocator: std.mem.Allocator, endpoint: []const u8, body: []const u8) ![]u8 {
     r.api_calls += 1;
@@ -1212,15 +1245,15 @@ fn apiRequestWithClient(configuration: WorkerConfiguration, allocator: std.mem.A
     const authorization = try allocator.alloc(u8, "Basic ".len + encoded_len);
     @memcpy(authorization[0..6], "Basic ");
     _ = std.base64.standard.Encoder.encode(authorization[6..], credentials);
-    var response: std.Io.Writer.Allocating = .init(allocator);
-    defer response.deinit();
-    const result = try client.fetch(.{ .location = .{ .url = url }, .method = method, .payload = body, .headers = .{ .authorization = .{ .override = authorization } }, .extra_headers = if (body != null) &.{.{ .name = "content-type", .value = "application/json" }} else &.{}, .redirect_behavior = .not_allowed, .response_writer = &response.writer });
+    var response_storage: [max_api_frame_bytes]u8 = undefined;
+    var response = std.Io.Writer.fixed(&response_storage);
+    const result = try client.fetch(.{ .location = .{ .url = url }, .method = method, .payload = body, .headers = .{ .authorization = .{ .override = authorization } }, .extra_headers = if (body != null) &.{.{ .name = "content-type", .value = "application/json" }} else &.{}, .redirect_behavior = .not_allowed, .response_writer = &response });
     const code = @intFromEnum(result.status);
     if (code < 200 or code >= 300) {
         common.log(.DEBUG, "OPNsense {s} {s} returned HTTP {d}", .{ @tagName(method), endpoint, code });
         return error.OpnsenseRequestFailed;
     }
-    return try allocator.dupe(u8, response.written());
+    return try allocator.dupe(u8, response.buffered());
 }
 fn writeFdAll(fd: c_int, bytes: []const u8) !void {
     var offset: usize = 0;
@@ -1246,27 +1279,47 @@ fn responseUuid(allocator: std.mem.Allocator, response: []const u8) ![]const u8 
 fn sql(db: *c.sqlite3, statement: [:0]const u8) !void {
     if (c.sqlite3_exec(db, statement, null, null, null) != c.SQLITE_OK) return error.SqliteFailed;
 }
+fn persistedReconfigureDue(db: *c.sqlite3) !?i64 {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, "SELECT value FROM manager_state WHERE key='reconfigure_due'", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
+    defer _ = c.sqlite3_finalize(stmt);
+    return switch (c.sqlite3_step(stmt)) {
+        c.SQLITE_ROW => c.sqlite3_column_int64(stmt, 0),
+        c.SQLITE_DONE => null,
+        else => error.SqliteFailed,
+    };
+}
+fn persistReconfigureDue(db: *c.sqlite3, due: i64) !void {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, "INSERT INTO manager_state(key,value) VALUES('reconfigure_due',?) ON CONFLICT(key) DO UPDATE SET value=MIN(value,excluded.value)", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
+    defer _ = c.sqlite3_finalize(stmt);
+    if (c.sqlite3_bind_int64(stmt, 1, due) != c.SQLITE_OK or c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
+}
+fn clearReconfigureDue(db: *c.sqlite3) !void {
+    try sql(db, "DELETE FROM manager_state WHERE key='reconfigure_due'");
+}
 fn lookup(db: *c.sqlite3, allocator: std.mem.Allocator, hostname: []const u8) !?[]const u8 {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "SELECT uuid FROM overrides WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
-    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
-    return try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0)));
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
+    return switch (c.sqlite3_step(stmt)) {
+        c.SQLITE_ROW => try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, 0))),
+        c.SQLITE_DONE => null,
+        else => error.SqliteFailed,
+    };
 }
 fn store(db: *c.sqlite3, hostname: []const u8, uuid: []const u8, ip: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "INSERT INTO overrides(hostname,uuid,ip_address) VALUES(?,?,?) ON CONFLICT(hostname) DO UPDATE SET uuid=excluded.uuid,ip_address=excluded.ip_address", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
-    _ = c.sqlite3_bind_text(stmt, 2, uuid.ptr, @intCast(uuid.len), c.SQLITE_TRANSIENT);
-    _ = c.sqlite3_bind_text(stmt, 3, ip.ptr, @intCast(ip.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK or c.sqlite3_bind_text(stmt, 2, uuid.ptr, @intCast(uuid.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK or c.sqlite3_bind_text(stmt, 3, ip.ptr, @intCast(ip.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }
 fn delete(db: *c.sqlite3, hostname: []const u8) !void {
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, "DELETE FROM overrides WHERE hostname=?", -1, &stmt, null) != c.SQLITE_OK) return error.SqliteFailed;
     defer _ = c.sqlite3_finalize(stmt);
-    _ = c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT);
+    if (c.sqlite3_bind_text(stmt, 1, hostname.ptr, @intCast(hostname.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteFailed;
     if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteFailed;
 }

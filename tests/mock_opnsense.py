@@ -16,7 +16,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         delay = float(os.environ.get("OPNSENSE_DELAY_SECONDS", "0"))
         if delay:
             time.sleep(delay)
-        data = json.dumps(payload).encode()
+        oversize = int(os.environ.get("OPNSENSE_RESPONSE_BYTES", "0"))
+        data = (b'{"padding":"' + b"x" * oversize + b'"}') if oversize else json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))

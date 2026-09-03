@@ -44,13 +44,23 @@ grep -q 'POST /api/unbound/service/reconfigure' "$tmp/opnsense.log"
 kill "$opnsense_pid"
 wait "$opnsense_pid" 2>/dev/null || true
 rm -f "$tmp/opnsense.port"
-OPNSENSE_BIND_PORT="$port" OPNSENSE_DELAY_SECONDS=6 python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" >"$tmp/mock.log" 2>&1 &
+OPNSENSE_BIND_PORT="$port" OPNSENSE_DELAY_SECONDS=8 python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" >"$tmp/mock.log" 2>&1 &
 opnsense_pid=$!
 for _ in $(seq 1 50); do [ -f "$tmp/opnsense.port" ] && break; sleep 0.05; done
 timeout_started=$(date +%s)
 if LEASELINKD_CONFIG="$tmp/config.json" LEASELINKD_SECRETS="$tmp/secrets.json" "$manager" --api-test >"$tmp/api-timeout.log" 2>&1; then exit 1; fi
-test $(($(date +%s) - timeout_started)) -lt 6
+test $(($(date +%s) - timeout_started)) -lt 7
 grep -q 'ApiTimeout' "$tmp/api-timeout.log"
+kill "$opnsense_pid"
+wait "$opnsense_pid" 2>/dev/null || true
+rm -f "$tmp/opnsense.port"
+OPNSENSE_BIND_PORT="$port" OPNSENSE_RESPONSE_BYTES=131072 python3 tests/mock_opnsense.py "$tmp/opnsense.port" "$tmp/opnsense.log" >"$tmp/mock.log" 2>&1 &
+opnsense_pid=$!
+for _ in $(seq 1 50); do [ -f "$tmp/opnsense.port" ] && break; sleep 0.05; done
+oversize_started=$(date +%s)
+if LEASELINKD_CONFIG="$tmp/config.json" LEASELINKD_SECRETS="$tmp/secrets.json" "$manager" --api-test >"$tmp/api-oversize.log" 2>&1; then exit 1; fi
+test $(($(date +%s) - oversize_started)) -lt 6
+grep -q 'OpnsenseRequestFailed' "$tmp/api-oversize.log"
 kill "$opnsense_pid"
 wait "$opnsense_pid" 2>/dev/null || true
 rm -f "$tmp/opnsense.port"
@@ -64,6 +74,7 @@ for _ in $(seq 1 50); do [ -S "$tmp/unbound.sock" ] && break; sleep 0.05; done
 [ -S "$tmp/unbound.sock" ]
 grep -q 'leaselinkd v3.0.4 starting; architecture=' "$tmp/manager.log"
 grep -q 'config: api=' "$tmp/manager.log"
+for _ in $(seq 1 100); do grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log" && break; sleep 0.05; done
 grep -q 'OPNsense startup health check passed: api=' "$tmp/manager.log"
 for _ in $(seq 1 50); do python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()" && break; sleep 0.05; done
 python3 -c "import urllib.request; assert b'leaselinkd_process_resident_memory_bytes' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()"
@@ -85,6 +96,14 @@ sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM overrides' | grep -qx 0
 grep -q 'POST /api/unbound/settings/del_host_override/override-uuid' "$tmp/opnsense.log"
 for _ in $(seq 1 30); do test "$(grep -c 'service/reconfigure' "$tmp/opnsense.log")" -eq 2 && break; sleep 0.1; done
 test "$(grep -c 'service/reconfigure' "$tmp/opnsense.log")" -eq 2
+worker_pid=$(pgrep -P "$manager_pid")
+kill -KILL "$worker_pid"
+KEA_LEASE4_HOSTNAME=workerrespawn KEA_LEASE4_ADDRESS=192.0.2.49 KEA_LEASE4_HWADDR=00:11:22:33:44:54 "$hook" --config "$tmp/hook.json" lease4_committed
+for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='workerrespawn'" | grep -qx 192.0.2.49 && break; sleep 0.05; done
+sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='workerrespawn'" | grep -qx 192.0.2.49
+for _ in $(seq 1 50); do new_worker_pid=$(pgrep -P "$manager_pid" || true); [ -n "${new_worker_pid:-}" ] && [ "$new_worker_pid" != "$worker_pid" ] && break; sleep 0.05; done
+[ "${new_worker_pid:-}" != "$worker_pid" ]
+python3 -c "import urllib.request; assert b'leaselinkd_opnsense_api_worker_up 1' in urllib.request.urlopen('http://127.0.0.1:$metrics_port/metrics').read()"
 KEA_LEASE4_HOSTNAME=renewed KEA_LEASE4_ADDRESS=192.0.2.60 KEA_LEASE4_HWADDR=00:11:22:33:44:66 "$hook" --config "$tmp/hook.json" lease4_committed
 for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='renewed'" | grep -qx 192.0.2.60 && break; sleep 0.05; done
 KEA_LEASE4_HOSTNAME=renewed KEA_LEASE4_ADDRESS=192.0.2.61 KEA_LEASE4_HWADDR=00:11:22:33:44:66 "$hook" --config "$tmp/hook.json" lease4_renew
@@ -97,9 +116,9 @@ KEA_LEASE4_HOSTNAME=renewed KEA_LEASE4_ADDRESS=192.0.2.61 KEA_LEASE4_HWADDR=00:1
 for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT count(*) FROM overrides WHERE hostname='renewed'" | grep -qx 0 && break; sleep 0.05; done
 sqlite3 "$tmp/ledger.sqlite" "SELECT count(*) FROM overrides WHERE hostname='renewed'" | grep -qx 0
 python3 tests/burst_lease_events.py "$tmp/unbound.sock" 32 burst
-for _ in $(seq 1 600); do test "$(sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM overrides')" -eq 32 && break; sleep 0.05; done
-test "$(sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM overrides')" -eq 32
-test "$(grep -c 'POST /api/unbound/settings/add_host_override' "$tmp/opnsense.log")" -eq 34
+for _ in $(seq 1 600); do test "$(sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM overrides')" -eq 33 && break; sleep 0.05; done
+test "$(sqlite3 "$tmp/ledger.sqlite" 'SELECT count(*) FROM overrides')" -eq 33
+test "$(grep -c 'POST /api/unbound/settings/add_host_override' "$tmp/opnsense.log")" -eq 35
 # The manager's startup health check and all subsequent API calls share one HTTP/1.1 worker connection.
 test "$(sed -n 's/.* peer=\([0-9][0-9]*\) body=.*/\1/p' "$tmp/opnsense.log" | sort -u | wc -l | tr -d ' ')" -eq 1
 env -u KEA_LEASE4_HOSTNAME KEA_LEASE4_ADDRESS=192.0.2.61 "$hook" --config "$tmp/hook.json" lease4_renew >"$tmp/hostname-less-renew.log" 2>&1
@@ -109,7 +128,7 @@ for _ in $(seq 1 50); do sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM ov
 sqlite3 "$tmp/ledger.sqlite" "SELECT ip_address FROM overrides WHERE hostname='batchhost'" | grep -qx 192.0.2.70
 if KEA_LEASELINK_CONFIG="$tmp/hook.json" KEA_LEASE4_HOSTNAME=loopback KEA_LEASE4_ADDRESS=127.0.0.1 KEA_LEASE4_HWADDR=00:11:22:33:44:55 "$hook" --loglevel DEBUG lease4_committed >"$tmp/loopback.log" 2>&1; then exit 1; fi
 grep -q 'invalid or loopback IPv4 lease address' "$tmp/loopback.log"
-test "$(grep -c 'settings/add_host_override' "$tmp/opnsense.log")" -eq 35
+test "$(grep -c 'settings/add_host_override' "$tmp/opnsense.log")" -eq 36
 resync_searches=$(grep -c 'GET /api/unbound/settings/search_host_override' "$tmp/opnsense.log" || true)
 kill -USR2 "$manager_pid"
 for _ in $(seq 1 30); do grep -q 'SIGUSR2 requested SQLite-to-OPNsense resync' "$tmp/manager.log" && break; sleep 0.1; done

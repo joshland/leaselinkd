@@ -4,6 +4,14 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Made SQLite reads fail closed: bind and step failures are no longer treated
+  as missing lease state, so reconciliation will not delete a remote managed
+  override when local ownership is uncertain. Desired/legacy ledger updates
+  after remote add, update, and delete operations now commit together, and a
+  pending Unbound reconfigure deadline is persisted across manager restarts.
+- Bounded the API worker's HTTP response body before allocation at 128 KiB.
+  The integration suite now verifies that an oversized OPNsense response fails
+  promptly without allowing an unbounded worker allocation.
 - Replaced the in-process OPNsense HTTP client worker with an exec-isolated
   worker launched through `posix_spawn`. Its only inherited application file
   descriptor is a fixed, private IPC socket; it receives the OPNsense endpoint
