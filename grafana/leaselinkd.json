@@ -24,6 +24,11 @@
       "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 }, "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
     },
     {
+      "type": "stat", "title": "API worker", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "leaselinkd_opnsense_api_worker_up", "refId": "A" }],
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 37 }, "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
       "type": "timeseries", "title": "Lease intake and rejections", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         { "expr": "sum(rate(leaselinkd_lease_events_total[$__rate_interval]))", "legendFormat": "accepted", "refId": "A" },
@@ -57,6 +62,21 @@
         { "expr": "sum(rate(leaselinkd_opnsense_api_request_bytes_total[$__rate_interval]))", "legendFormat": "sent", "refId": "A" },
         { "expr": "sum(rate(leaselinkd_opnsense_api_response_bytes_total[$__rate_interval]))", "legendFormat": "received", "refId": "B" }
       ], "fieldConfig": { "defaults": { "unit": "Bps" } }, "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 }
+    },
+    {
+      "type": "timeseries", "title": "OPNsense API worker latency (p50 / p95)", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(leaselinkd_opnsense_api_worker_request_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(leaselinkd_opnsense_api_worker_request_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "sum(rate(leaselinkd_opnsense_api_worker_failures_total[$__rate_interval])) by (method)", "legendFormat": "{{method}} failures/s", "refId": "C" }
+      ], "fieldConfig": { "defaults": { "unit": "ms" } }, "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 }
+    },
+    {
+      "type": "timeseries", "title": "OPNsense API worker memory", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "leaselinkd_opnsense_api_worker_resident_memory_bytes", "legendFormat": "resident", "refId": "A" },
+        { "expr": "leaselinkd_opnsense_api_worker_virtual_memory_bytes", "legendFormat": "virtual", "refId": "B" }
+      ], "fieldConfig": { "defaults": { "unit": "bytes" } }, "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 }
     },
     {
       "type": "timeseries", "title": "Health, reconfigure, and scrape activity", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },

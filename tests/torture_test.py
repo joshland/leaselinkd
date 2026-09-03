@@ -394,7 +394,13 @@ def main():
         writes = api_writes(output / "opnsense.log")
         if writes == 0:
             fail("mock OPNsense received no host-override writes; force-update path was not exercised")
-        (output / "summary.txt").write_text(f"rounds={round_number}\napi_host_override_writes={writes}\n", encoding="utf-8")
+        (output / "summary.txt").write_text(
+            f"requested_duration_seconds={args.duration}\n"
+            f"observed_duration_seconds={time.monotonic() - started:.3f}\n"
+            f"rounds={round_number}\n"
+            f"api_host_override_writes={writes}\n",
+            encoding="utf-8",
+        )
         print(f"complete rounds={round_number} api_host_override_writes={writes}", flush=True)
     finally:
         harness.stop()

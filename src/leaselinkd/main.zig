@@ -4,6 +4,7 @@ const common = @import("common");
 const prometheus = @import("prometheus.zig");
 const httpz = @import("httpz");
 const c = @cImport({
+    @cDefine("_GNU_SOURCE", "1");
     @cDefine("_FORTIFY_SOURCE", "0");
     @cInclude("sys/socket.h");
     @cInclude("sys/types.h");
@@ -15,6 +16,7 @@ const c = @cImport({
     @cInclude("signal.h");
     @cInclude("time.h");
     @cInclude("unistd.h");
+    @cInclude("spawn.h");
     @cInclude("fcntl.h");
     @cInclude("sys/wait.h");
     @cInclude("sqlite3.h");
@@ -31,11 +33,15 @@ const Desired = struct { hostname: []const u8, owner_id: []const u8, ip: []const
 var report_requested: std.atomic.Value(u8) = .init(0);
 var resync_requested: std.atomic.Value(u8) = .init(0);
 var shutdown_requested: std.atomic.Value(u8) = .init(0);
-const Command = enum { run, config_check, api_test };
-const CommandOptions = struct { command: Command = .run, config_path: ?[]const u8 = null, secrets_path: ?[]const u8 = null, loglevel_set: bool = false };
+const Command = enum { run, config_check, api_test, api_worker };
+const CommandOptions = struct { command: Command = .run, config_path: ?[]const u8 = null, secrets_path: ?[]const u8 = null, worker_fd: ?c_int = null, loglevel_set: bool = false };
 const api_worker_error: u64 = std.math.maxInt(u64);
 const max_api_frame_bytes = 128 * 1024;
 const ApiRequestHeader = extern struct { method: u8, endpoint_len: u32, body_len: u32 };
+const ApiWorkerResponse = extern struct { response_len: u64, elapsed_ms: u64 };
+const ApiWorkerBootstrap = extern struct { magic: u32 = 0x4c4c4150, version: u32 = 1, url_len: u32, key_len: u32, secret_len: u32 };
+const api_worker_ready: u8 = 1;
+const WorkerConfiguration = struct { opnsense_url: []u8, key: []u8, secret: []u8 };
 const PrometheusServer = struct {
     server: httpz.Server(MetricsHandler),
     thread: std.Thread,
@@ -100,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
         .api_test => {
             try runApiTest(init, allocator, options);
         },
+        .api_worker => try runApiWorker(init, options.worker_fd orelse return error.MissingWorkerFd),
     }
 }
 fn runApiTest(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOptions) !void {
@@ -163,7 +170,7 @@ fn run(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOpt
         if (result > 0 and (ready.revents & c.POLLIN) != 0) {
             var accepted: usize = 0;
             while (accepted < max_accepts_per_iteration) : (accepted += 1) {
-                const client = c.accept(fd, null, null);
+                const client = c.accept(fd, .{ .__sockaddr__ = null }, null);
                 if (client >= 0) {
                     if (!setNonBlocking(client)) {
                         _ = c.close(client);
@@ -208,6 +215,11 @@ fn parseCommand(init: std.process.Init) !?CommandOptions {
         } else if (std.mem.eql(u8, args[i], "--api-test")) {
             if (options.command != .run) return error.ConflictingCommand;
             options.command = .api_test;
+        } else if (std.mem.eql(u8, args[i], "--api-worker-fd")) {
+            i += 1;
+            if (i == args.len or options.command != .run) return error.ConflictingCommand;
+            options.worker_fd = std.fmt.parseInt(c_int, args[i], 10) catch return error.InvalidWorkerFd;
+            options.command = .api_worker;
         } else return error.UnexpectedArgument;
     }
     return options;
@@ -316,7 +328,7 @@ fn listenUnix(path: []const u8) !c_int {
     addr.sun_family = c.AF_UNIX;
     for (path, 0..) |ch, i| addr.sun_path[i] = @intCast(ch);
     const len = @offsetOf(c.struct_sockaddr_un, "sun_path") + path.len + 1;
-    if (c.bind(fd, @ptrCast(&addr), @intCast(len)) != 0 or c.chmod(&path_z, 0o660) != 0 or c.listen(fd, max_pending_events) != 0 or c.fcntl(fd, c.F_SETFL, c.fcntl(fd, c.F_GETFL) | c.O_NONBLOCK) < 0) return error.BindFailed;
+    if (c.bind(fd, .{ .__sockaddr_un__ = &addr }, @intCast(len)) != 0 or c.chmod(&path_z, 0o660) != 0 or c.listen(fd, max_pending_events) != 0 or c.fcntl(fd, c.F_SETFL, c.fcntl(fd, c.F_GETFL) | c.O_NONBLOCK) < 0) return error.BindFailed;
     return fd;
 }
 fn listenTcp(host: []const u8, port: u16) !c_int {
@@ -331,7 +343,7 @@ fn listenTcp(host: []const u8, port: u16) !c_int {
     const host_z = try std.heap.page_allocator.dupeZ(u8, host);
     defer std.heap.page_allocator.free(host_z);
     if (c.inet_pton(c.AF_INET, host_z.ptr, &addr.sin_addr) != 1) return error.InvalidTcpHost;
-    if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.struct_sockaddr_in)) != 0 or c.listen(fd, max_pending_events) != 0 or c.fcntl(fd, c.F_SETFL, c.fcntl(fd, c.F_GETFL) | c.O_NONBLOCK) < 0) return error.BindFailed;
+    if (c.bind(fd, .{ .__sockaddr_in__ = &addr }, @sizeOf(c.struct_sockaddr_in)) != 0 or c.listen(fd, max_pending_events) != 0 or c.fcntl(fd, c.F_SETFL, c.fcntl(fd, c.F_GETFL) | c.O_NONBLOCK) < 0) return error.BindFailed;
     return fd;
 }
 fn setNonBlocking(fd: c_int) bool {
@@ -458,7 +470,7 @@ fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: [
     const fd = c.socket(c.AF_INET, c.SOCK_DGRAM, 0);
     if (fd < 0) return error.DnsSocketFailed;
     defer _ = c.close(fd);
-    if (c.sendto(fd, &query, query_len, 0, @ptrCast(&address), @sizeOf(c.struct_sockaddr_in)) < 0) return error.DnsSendFailed;
+    if (c.sendto(fd, &query, query_len, 0, .{ .__sockaddr_in__ = &address }, @sizeOf(c.struct_sockaddr_in)) < 0) return error.DnsSendFailed;
     var ready = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
     if (c.poll(&ready, 1, 2000) <= 0) return error.DnsTimeout;
     var reply: [2048]u8 = undefined;
@@ -1022,17 +1034,19 @@ fn apiWithTimeout(r: *const Runtime, allocator: std.mem.Allocator, method: std.h
         stopApiWorker(runtime);
         return err;
     };
-    var encoded_length: u64 = undefined;
-    readFdUntil(runtime.api_worker_fd, std.mem.asBytes(&encoded_length), deadline) catch |err| {
+    var worker_response: ApiWorkerResponse = undefined;
+    readFdUntil(runtime.api_worker_fd, std.mem.asBytes(&worker_response), deadline) catch |err| {
         stopApiWorker(runtime);
         return err;
     };
-    if (encoded_length == api_worker_error or encoded_length > max_api_frame_bytes) {
+    const worker_succeeded = worker_response.response_len != api_worker_error and worker_response.response_len <= max_api_frame_bytes;
+    prometheus.apiWorkerRequest(@tagName(method), worker_response.elapsed_ms, worker_succeeded);
+    if (!worker_succeeded) {
         stopApiWorker(runtime);
         common.log(.WARN, "OPNsense request failed; for HTTPS certificate diagnostics, run /usr/share/leaselinkd/check-firewall-certificate.sh --host <firewall-host> --port <https-port>", .{});
         return error.OpnsenseRequestFailed;
     }
-    const response = try allocator.alloc(u8, @intCast(encoded_length));
+    const response = try allocator.alloc(u8, @intCast(worker_response.response_len));
     readFdUntil(runtime.api_worker_fd, response, deadline) catch |err| {
         stopApiWorker(runtime);
         return err;
@@ -1043,21 +1057,64 @@ fn startApiWorker(r: *Runtime) !void {
     if (r.api_worker_fd >= 0) return;
     var sockets: [2]c_int = undefined;
     if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &sockets) != 0) return error.ApiWorkerSocketFailed;
-    const pid = c.fork();
-    if (pid < 0) {
+    const self_path_z: [:0]const u8 = "/proc/self/exe";
+    var fd_text: [16]u8 = undefined;
+    const fd_text_z = try std.fmt.bufPrintZ(&fd_text, "{d}", .{3});
+    var argv: [4]?[*:0]const u8 = .{ self_path_z.ptr, "--api-worker-fd", fd_text_z.ptr, null };
+    var actions: c.posix_spawn_file_actions_t = undefined;
+    if (c.posix_spawn_file_actions_init(&actions) != 0) {
         _ = c.close(sockets[0]);
         _ = c.close(sockets[1]);
-        return error.ApiForkFailed;
+        return error.ApiWorkerSpawnFailed;
     }
-    if (pid == 0) {
+    defer _ = c.posix_spawn_file_actions_destroy(&actions);
+    if (c.posix_spawn_file_actions_addclose(&actions, sockets[0]) != 0 or
+        (sockets[1] != 3 and c.posix_spawn_file_actions_adddup2(&actions, sockets[1], 3) != 0) or
+        (sockets[1] != 3 and c.posix_spawn_file_actions_addclose(&actions, sockets[1]) != 0) or
+        c.posix_spawn_file_actions_addclosefrom_np(&actions, 4) != 0)
+    {
         _ = c.close(sockets[0]);
-        apiWorkerLoop(r, sockets[1]);
         _ = c.close(sockets[1]);
-        c._exit(0);
+        return error.ApiWorkerSpawnFailed;
+    }
+    var empty_environment: [1]?[*:0]const u8 = .{null};
+    var pid: c.pid_t = undefined;
+    if (c.posix_spawn(&pid, self_path_z.ptr, &actions, null, @ptrCast(&argv), @ptrCast(&empty_environment)) != 0) {
+        _ = c.close(sockets[0]);
+        _ = c.close(sockets[1]);
+        return error.ApiWorkerSpawnFailed;
     }
     _ = c.close(sockets[1]);
     r.api_worker_fd = sockets[0];
     r.api_worker_pid = pid;
+    prometheus.apiWorkerStarted(pid);
+    const deadline = monotonicMilliseconds() + r.config.api_timeout_seconds * 1000;
+    const bootstrap = ApiWorkerBootstrap{ .url_len = @intCast(r.config.opnsense_url.len), .key_len = @intCast(r.key.len), .secret_len = @intCast(r.secret.len) };
+    writeFdUntil(r.api_worker_fd, std.mem.asBytes(&bootstrap), deadline) catch |err| {
+        stopApiWorker(r);
+        return err;
+    };
+    writeFdUntil(r.api_worker_fd, r.config.opnsense_url, deadline) catch |err| {
+        stopApiWorker(r);
+        return err;
+    };
+    writeFdUntil(r.api_worker_fd, r.key, deadline) catch |err| {
+        stopApiWorker(r);
+        return err;
+    };
+    writeFdUntil(r.api_worker_fd, r.secret, deadline) catch |err| {
+        stopApiWorker(r);
+        return err;
+    };
+    var ready: u8 = 0;
+    readFdUntil(r.api_worker_fd, std.mem.asBytes(&ready), deadline) catch |err| {
+        stopApiWorker(r);
+        return err;
+    };
+    if (ready != api_worker_ready) {
+        stopApiWorker(r);
+        return error.ApiWorkerBootstrapFailed;
+    }
     common.log(.DEBUG, "started persistent OPNsense API worker pid={d}", .{pid});
 }
 fn stopApiWorker(r: *Runtime) void {
@@ -1069,9 +1126,25 @@ fn stopApiWorker(r: *Runtime) void {
     }
     r.api_worker_fd = -1;
     r.api_worker_pid = -1;
+    prometheus.apiWorkerStopped();
 }
-fn apiWorkerLoop(r: *const Runtime, fd: c_int) void {
-    var client: std.http.Client = .{ .allocator = std.heap.page_allocator, .io = r.io };
+fn runApiWorker(init: std.process.Init, fd: c_int) !void {
+    var bootstrap: ApiWorkerBootstrap = undefined;
+    try readFdExact(fd, std.mem.asBytes(&bootstrap));
+    if (bootstrap.magic != 0x4c4c4150 or bootstrap.version != 1 or bootstrap.url_len > max_api_frame_bytes or bootstrap.key_len > max_api_frame_bytes or bootstrap.secret_len > max_api_frame_bytes) return error.InvalidWorkerBootstrap;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const configuration = WorkerConfiguration{ .opnsense_url = try allocator.alloc(u8, bootstrap.url_len), .key = try allocator.alloc(u8, bootstrap.key_len), .secret = try allocator.alloc(u8, bootstrap.secret_len) };
+    try readFdExact(fd, configuration.opnsense_url);
+    try readFdExact(fd, configuration.key);
+    try readFdExact(fd, configuration.secret);
+    try writeFdAll(fd, &.{api_worker_ready});
+    common.log(.INFO, "OPNsense API worker bootstrap complete", .{});
+    apiWorkerLoop(init.io, configuration, fd);
+}
+fn apiWorkerLoop(io: std.Io, configuration: WorkerConfiguration, fd: c_int) void {
+    var client: std.http.Client = .{ .allocator = std.heap.page_allocator, .io = io };
     defer client.deinit();
     while (true) {
         var header: ApiRequestHeader = undefined;
@@ -1086,18 +1159,19 @@ fn apiWorkerLoop(r: *const Runtime, fd: c_int) void {
         const body = allocator.alloc(u8, header.body_len) catch return;
         readFdExact(fd, endpoint) catch return;
         readFdExact(fd, body) catch return;
-        const response = apiRequestWithClient(r, allocator, &client, if (header.method == 0) .GET else .POST, endpoint, if (header.body_len == 0) null else body) catch |err| {
+        const started = monotonicMilliseconds();
+        const response = apiRequestWithClient(configuration, allocator, &client, if (header.method == 0) .GET else .POST, endpoint, if (header.body_len == 0) null else body) catch |err| {
             common.log(.DEBUG, "persistent OPNsense worker request failed: {t}", .{err});
-            writeWorkerResponse(fd, null) catch return;
+            writeWorkerResponse(fd, null, @intCast(@max(@as(i64, 0), monotonicMilliseconds() - started))) catch return;
             continue;
         };
-        writeWorkerResponse(fd, response) catch return;
+        writeWorkerResponse(fd, response, @intCast(@max(@as(i64, 0), monotonicMilliseconds() - started))) catch return;
         common.log(.TRACE, "API worker response written: response_bytes={d}", .{response.len});
     }
 }
-fn writeWorkerResponse(fd: c_int, response: ?[]const u8) !void {
-    var length: u64 = if (response) |value| @intCast(value.len) else api_worker_error;
-    try writeFdAll(fd, std.mem.asBytes(&length));
+fn writeWorkerResponse(fd: c_int, response: ?[]const u8, elapsed_ms: u64) !void {
+    var header = ApiWorkerResponse{ .response_len = if (response) |value| @intCast(value.len) else api_worker_error, .elapsed_ms = elapsed_ms };
+    try writeFdAll(fd, std.mem.asBytes(&header));
     if (response) |value| try writeFdAll(fd, value);
 }
 fn monotonicMilliseconds() i64 {
@@ -1131,9 +1205,9 @@ fn readFdUntil(fd: c_int, bytes: []u8, deadline: i64) !void {
         offset += @intCast(received);
     }
 }
-fn apiRequestWithClient(r: *const Runtime, allocator: std.mem.Allocator, client: *std.http.Client, method: std.http.Method, endpoint: []const u8, body: ?[]const u8) ![]u8 {
-    const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ r.config.opnsense_url, endpoint });
-    const credentials = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ r.key, r.secret });
+fn apiRequestWithClient(configuration: WorkerConfiguration, allocator: std.mem.Allocator, client: *std.http.Client, method: std.http.Method, endpoint: []const u8, body: ?[]const u8) ![]u8 {
+    const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ configuration.opnsense_url, endpoint });
+    const credentials = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ configuration.key, configuration.secret });
     const encoded_len = std.base64.standard.Encoder.calcSize(credentials.len);
     const authorization = try allocator.alloc(u8, "Basic ".len + encoded_len);
     @memcpy(authorization[0..6], "Basic ");

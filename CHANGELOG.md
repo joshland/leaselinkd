@@ -4,6 +4,15 @@ All notable development work is documented here. This project follows semantic v
 
 ## Unreleased
 
+- Replaced the in-process OPNsense HTTP client worker with an exec-isolated
+  worker launched through `posix_spawn`. Its only inherited application file
+  descriptor is a fixed, private IPC socket; it receives the OPNsense endpoint
+  and credentials through a bounded bootstrap frame and must
+  acknowledge that frame before serving requests.
+- Added parent-exported isolated-worker metrics: per-method request/failure
+  counters and an API-only latency histogram measured inside the child, plus
+  worker availability, PID, resident-memory, and virtual-memory gauges.
+  Updated the Grafana dashboard with worker latency/failure and memory panels.
 - Hardened lease intake against slow or malformed clients: accepted sockets are
   nonblocking, each request has a one-second whole-request deadline, intake is
   serviced in bounded batches, request length arithmetic is overflow-safe, and
