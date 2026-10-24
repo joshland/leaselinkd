@@ -1,11 +1,7 @@
 const std = @import("std");
 const m = @import("metrics");
 
-const c = @cImport({
-    @cInclude("stdio.h");
-    @cInclude("sys/resource.h");
-    @cInclude("unistd.h");
-});
+const c = @import("c");
 
 const Metrics = struct {
     lease_events: m.Counter(u64),
@@ -175,7 +171,7 @@ fn sampleWorker(page_size: u64) void {
         return;
     }
     var path: [64:0]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path, "/proc/{d}/statm", .{pid}) catch return;
+    const path_z = std.mem.printSentinel(&path, "/proc/{d}/statm", .{pid}, 0) catch return;
     const statm_file = c.fopen(path_z.ptr, "r") orelse {
         clearWorkerMetrics();
         return;
@@ -205,12 +201,12 @@ fn sampleWorker(page_size: u64) void {
 
 fn sampleWorkerCpu(pid: c_int) void {
     var path: [64:0]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path, "/proc/{d}/stat", .{pid}) catch return;
+    const path_z = std.mem.printSentinel(&path, "/proc/{d}/stat", .{pid}, 0) catch return;
     const stat_file = c.fopen(path_z.ptr, "r") orelse return;
     defer _ = c.fclose(stat_file);
     var stat: [1024]u8 = undefined;
     const read = c.fread(&stat, 1, stat.len, stat_file);
-    const closing_paren = std.mem.lastIndexOfScalar(u8, stat[0..read], ')') orelse return;
+    const closing_paren = std.mem.findScalarLast(u8, stat[0..read], ')') orelse return;
     var fields = std.mem.tokenizeAny(u8, stat[closing_paren + 1 .. read], " \n");
     var field_index: usize = 0;
     var user_ticks: ?u64 = null;

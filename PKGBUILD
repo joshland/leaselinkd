@@ -1,14 +1,14 @@
 # Maintainer: Joshua Schmidlkofer <joshua@joshuainnovates.us>
 # URL: https://github.com/joshland/leaselinkd
 pkgname=leaselinkd
-pkgver=3.0.5
-pkgrel=1
+pkgver=3.1.0
+pkgrel=2
 install=leaselinkd.install
 arch=('x86_64')
 url="https://github.com/joshland/leaselinkd"
 license=('MIT')
 depends=('ca-certificates' 'kea' 'openssl' 'python' 'python-psycopg' 'python-typer' 'sqlite' 'systemd')
-makedepends=('zig')
+makedepends=('zig>=0.17.0' 'zig<0.18.0')
 checkdepends=('python')
 backup=('etc/leaselinkd/config.json'
         'etc/leaselinkd/secrets.json'

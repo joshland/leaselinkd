@@ -11,7 +11,7 @@ OPNsense API and never contacts a firewall.
 
 ## Prerequisites
 
-The regular test suite needs Zig `0.16.0`, Python 3, SQLite, and a C compiler
+The regular test suite needs Zig `0.17.0`, Python 3, SQLite, and a C compiler
 toolchain. The memory tests additionally use Linux `/proc`, `pmap`, and `lsof`.
 
 Build the binaries used by direct scripts:

@@ -1,17 +1,6 @@
 const std = @import("std");
 const common = @import("common");
-const c = @cImport({
-    @cDefine("_FORTIFY_SOURCE", "0");
-    @cInclude("sys/socket.h");
-    @cInclude("sys/un.h");
-    @cInclude("netinet/in.h");
-    @cInclude("arpa/inet.h");
-    @cInclude("poll.h");
-    @cInclude("fcntl.h");
-    @cInclude("time.h");
-    @cInclude("signal.h");
-    @cInclude("unistd.h");
-});
+const c = @import("c");
 const HookConfig = struct { leaselinkd_address: []const u8 = "unix:///run/leaselinkd/fifo.pipe", timeout_seconds: i64 = 2, loglevel: ?[]const u8 = null };
 const CommandOptions = struct { event: []const u8, config_path: ?[]const u8 = null, loglevel_set: bool = false };
 const max_batch_entries = 256;
@@ -130,14 +119,14 @@ fn forwardCommittedBatch(init: std.process.Init, allocator: std.mem.Allocator, o
     const deadline = Deadline.init(config.timeout_seconds);
     var forwarded: usize = 0;
     for (0..count) |index| {
-        const hostname_name = try std.fmt.allocPrint(allocator, "KEA_LEASES4_AT{d}_HOSTNAME", .{index});
-        const upstream_hostname_name = try std.fmt.allocPrint(allocator, "LEASES4_AT{d}_HOSTNAME", .{index});
+        const hostname_name = try allocator.print("KEA_LEASES4_AT{d}_HOSTNAME", .{index});
+        const upstream_hostname_name = try allocator.print("LEASES4_AT{d}_HOSTNAME", .{index});
         const hostname = envValue(env, hostname_name, upstream_hostname_name) orelse {
             common.log(.WARN, "leases4_committed entry {d} has no hostname; skipping", .{index});
             continue;
         };
-        const ip_name = try std.fmt.allocPrint(allocator, "KEA_LEASES4_AT{d}_ADDRESS", .{index});
-        const upstream_ip_name = try std.fmt.allocPrint(allocator, "LEASES4_AT{d}_ADDRESS", .{index});
+        const ip_name = try allocator.print("KEA_LEASES4_AT{d}_ADDRESS", .{index});
+        const upstream_ip_name = try allocator.print("LEASES4_AT{d}_ADDRESS", .{index});
         const ip = envValue(env, ip_name, upstream_ip_name) orelse {
             common.log(.WARN, "leases4_committed entry {d} has no address; skipping", .{index});
             continue;
@@ -146,10 +135,10 @@ fn forwardCommittedBatch(init: std.process.Init, allocator: std.mem.Allocator, o
             common.log(.WARN, "leases4_committed entry {d} is not a usable DNS record; skipping", .{index});
             continue;
         }
-        const mac_name = try std.fmt.allocPrint(allocator, "KEA_LEASES4_AT{d}_HWADDR", .{index});
-        const upstream_mac_name = try std.fmt.allocPrint(allocator, "LEASES4_AT{d}_HWADDR", .{index});
-        const lifetime_name = try std.fmt.allocPrint(allocator, "KEA_LEASES4_AT{d}_VALID_LIFETIME", .{index});
-        const upstream_lifetime_name = try std.fmt.allocPrint(allocator, "LEASES4_AT{d}_VALID_LIFETIME", .{index});
+        const mac_name = try allocator.print("KEA_LEASES4_AT{d}_HWADDR", .{index});
+        const upstream_mac_name = try allocator.print("LEASES4_AT{d}_HWADDR", .{index});
+        const lifetime_name = try allocator.print("KEA_LEASES4_AT{d}_VALID_LIFETIME", .{index});
+        const upstream_lifetime_name = try allocator.print("LEASES4_AT{d}_VALID_LIFETIME", .{index});
         forwardLease(config.leaselinkd_address, allocator, hostname, ip, envValue(env, mac_name, upstream_mac_name) orelse "", envValue(env, lifetime_name, upstream_lifetime_name) orelse "", "lease4_committed", deadline) catch |err| {
             common.log(.WARN, "leases4_committed entry {d} transmission failed: {t}", .{ index, err });
             if (err == error.ManagerTimeout) return err;
@@ -231,7 +220,7 @@ fn post(address: []const u8, body: []const u8, deadline: Deadline) !void {
 }
 fn sendEvent(fd: c_int, body: []const u8, deadline: Deadline) !void {
     var request: [256]u8 = undefined;
-    const head = try std.fmt.bufPrint(&request, "POST /lease_event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len});
+    const head = try std.mem.print(&request, "POST /lease_event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len});
     try sendAll(fd, head, deadline);
     try sendAll(fd, body, deadline);
     var response: [64]u8 = undefined;
@@ -253,7 +242,7 @@ fn postUnix(path: []const u8, body: []const u8, deadline: Deadline) !void {
     try sendEvent(fd, body, deadline);
 }
 fn postTcp(address: []const u8, body: []const u8, deadline: Deadline) !void {
-    const colon = std.mem.lastIndexOfScalar(u8, address, ':') orelse return error.InvalidManagerAddress;
+    const colon = std.mem.findScalarLast(u8, address, ':') orelse return error.InvalidManagerAddress;
     const host = address[0..colon];
     const port = try std.fmt.parseInt(u16, address[colon + 1 ..], 10);
     const fd = c.socket(c.AF_INET, c.SOCK_STREAM, 0);
@@ -263,7 +252,7 @@ fn postTcp(address: []const u8, body: []const u8, deadline: Deadline) !void {
     var addr: c.struct_sockaddr_in = std.mem.zeroes(c.struct_sockaddr_in);
     addr.sin_family = c.AF_INET;
     addr.sin_port = c.htons(port);
-    const host_z = try std.heap.page_allocator.dupeZ(u8, host);
+    const host_z = try std.heap.page_allocator.dupeSentinel(u8, host, 0);
     defer std.heap.page_allocator.free(host_z);
     if (c.inet_pton(c.AF_INET, host_z.ptr, &addr.sin_addr) != 1) return error.InvalidManagerAddress;
     try connectWithDeadline(fd, @ptrCast(&addr), @sizeOf(c.struct_sockaddr_in), deadline);

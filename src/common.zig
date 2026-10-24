@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const version = "3.0.5";
+pub const version = "3.1.0";
 pub const LogLevel = enum(u8) { ERROR = 0, WARN = 1, INFO = 2, DEBUG = 3, TRACE = 4 };
 var active_log_level: LogLevel = .INFO;
 
@@ -11,7 +11,7 @@ pub fn logLevel() LogLevel {
     return active_log_level;
 }
 pub fn log(comptime level: LogLevel, comptime format: []const u8, args: anytype) void {
-    if (@intFromEnum(level) <= @intFromEnum(active_log_level)) std.debug.print("[{s}] " ++ format ++ "\n", .{@tagName(level)} ++ args);
+    if (@backingInt(level) <= @backingInt(active_log_level)) std.debug.print("[{s}] " ++ format ++ "\n", .{@tagName(level)} ++ args);
 }
 
 pub const Lease = struct { hostname: []const u8, @"ip-address": []const u8, @"mac-address": []const u8 = "", @"valid-lifetime": []const u8 = "", @"subnet-id": []const u8 = "", @"query-interface": []const u8 = "" };

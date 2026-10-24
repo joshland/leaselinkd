@@ -1,16 +1,16 @@
 .{
     .name = .leaselinkd,
-    .version = "3.0.5",
+    .version = "3.1.0",
     .fingerprint = 0x332e6fdb6f0c1110,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .httpz = .{
-            .url = "git+https://github.com/karlseguin/http.zig?ref=master#9b14af98fde5e98abb9a8376fe02b42003e835bf",
-            .hash = "httpz-0.0.0-PNVzrMgTCQDhzfBLRRebTx9LU056Ph2erdN9-42rFbhj",
+            .url = "git+https://github.com/karlseguin/http.zig?ref=master#e8272bfd5727aade0dcee3e2aba6c50f57c374b6",
+            .hash = "httpz-0.0.0-PNVzrNAXCQDHb-rRH2jq07A3Ekv3GS6XOTkiqZJtKeqv",
         },
         .metrics = .{
-            .url = "git+https://github.com/karlseguin/metrics.zig?ref=master#1621f82e7ecf2b3dddf5730bf52761af354a7080",
-            .hash = "metrics-0.0.0-W7G4eJOgAQDBacPAeqGCaY8gV7zuddUQyikGNq7nDPds",
+            .url = "git+https://github.com/karlseguin/metrics.zig?ref=master#3676413b54c8b36c3aca2c22500aaf065ff2b45d",
+            .hash = "metrics-0.0.0-W7G4eIqtAQDVZUfnac9O7sSc12T4Mf4E0wVrbQMJzAPu",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "zig-pkg", "grafana", "tests", "examples", "packaging", "README.md", "CHANGELOG.md", "MEMORY.md", "AGENTS.md", "PKGBUILD", "leaselinkd.install" },

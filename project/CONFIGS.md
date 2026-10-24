@@ -32,7 +32,8 @@ connection or cron-scheduling fields.
 
 `opnsense_url` is required and must begin with `https://` or `http://`; it
 includes `/api/unbound` exactly once. For HTTPS, use a DNS hostname covered by
-a `DNS:` SAN on the firewall Web GUI certificate. `listen_type` is `unix` by
+a `DNS:` SAN, or an IPv4 address covered by an `IP Address:` SAN, on the
+firewall Web GUI certificate. `listen_type` is `unix` by
 default; set it to `tcp` only when using the local TCP listener.
 
 `dns_servers` lists IPv4 UDP resolver endpoints used to validate A records.

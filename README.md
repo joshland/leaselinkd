@@ -2,7 +2,7 @@
 
 `leaselinkd` synchronizes Kea DHCPv4 lease events to OPNsense Unbound host overrides.
 
-It consists of two small Zig 0.16 binaries:
+It consists of two small Zig 0.17 binaries:
 
 - `leaselinkd` is the persistent local service. It accepts lease events, keeps a SQLite hostname-to-override UUID ledger, calls the OPNsense Unbound API, health-checks OPNsense, and defers Unbound reconfiguration to coalesce bursts of changes.
 - `kea-leaselink` is invoked by Kea's `libdhcp_run_script.so` hook. It converts the event environment into JSON, sends it to the manager, and exits.

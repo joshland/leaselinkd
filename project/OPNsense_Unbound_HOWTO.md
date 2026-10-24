@@ -8,7 +8,7 @@ connection.
 The packaged `/usr/share/leaselinkd/setup-leaselinkd.sh` automates the node
 side as a normal console user and uses `sudo` only for local privileged steps.
 It intentionally does not use the firewall API to establish initial access.
-Give it a certificate DNS SAN hostname and domain; with
+Give it a certificate DNS or IPv4 SAN host and domain; with
 `--transfer-provisioner` it sends this PHP script to the firewall over SSH.
 Without that option, it prints the exact `scp`/`ssh` commands and starts with
 the Web UI URL so the manual process remains available.
@@ -75,11 +75,12 @@ existing `x762-it` self-signed certificate does not meet that requirement, so
 strict TLS clients reject it even when it is installed locally. Create a new
 internal CA under **System → Trust → Authorities**, create a **Server
 Certificate** from that CA under **System → Trust → Certificates** with the
-firewall's DNS name as a `DNS:` SAN, and select that server certificate under
-**System → Settings → Administration → Web GUI → SSL Certificate**. An IP SAN
-alone is insufficient for Zig 0.16's native TLS verifier. Ensure the DHCP host
-can resolve that DNS name to the firewall, then fetch and install the new CA
-certificate before running the API test.
+firewall's DNS name as a `DNS:` SAN (or its IPv4 address as an `IP Address:`
+SAN), and select that server certificate under
+**System → Settings → Administration → Web GUI → SSL Certificate**. Zig 0.17's
+native TLS verifier accepts either SAN type when it matches the API URL host.
+When using a DNS name, ensure the DHCP host can resolve it to the firewall.
+Then fetch and install the new CA certificate before running the API test.
 
 If the manager configuration is not present yet, specify the endpoint
 explicitly:

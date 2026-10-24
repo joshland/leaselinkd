@@ -2,6 +2,37 @@
 
 All notable development work is documented here. This project follows semantic versioning; entries describe development milestones and may be packaged together when a release is built.
 
+## 3.1.0 — Zig 0.17 toolchain
+
+- Moved the build to Zig `0.17.0` (`minimum_zig_version`; PKGBUILD now
+  requires `zig>=0.17.0` and `zig<0.18.0`). C headers previously imported with
+  the removed `@cImport` builtin are now translated by `build.zig` translate-C
+  steps from `src/c/leaselinkd.h` and `src/c/kea_hook.h`, which keep the
+  `_GNU_SOURCE` and `_FORTIFY_SOURCE=0` definitions. Replaced removed or
+  deprecated standard-library calls (`dupeZ`, `bufPrintZ`, `fmt.allocPrint`,
+  `fmt.bufPrint`, `mem.indexOf*`/`lastIndexOf*`, `@intFromEnum`, `**`).
+- Updated `httpz` to `e8272bf` and `metrics` to `3676413`. Their Zig 0.17
+  ports pull in `websocket` `f2b3bad`. The httpz update returns
+  `ConnectionClosed` on a zero-byte read and uses `shutdown` to wake a blocked
+  metrics-listener `recv`.
+- Prometheus histogram buckets are now inclusive of their upper bound, so an
+  observation equal to a bound counts in that `le` bucket. This affects
+  `leaselinkd_lease_event_request_duration_milliseconds` and the API worker
+  latency histogram; dashboard quantiles may shift slightly lower.
+- HTTPS API URLs may now use an IPv4 address when the OPNsense Web GUI
+  certificate carries a matching `IP Address:` SAN. Zig 0.17's verifier matches
+  iPAddress SANs (a DNS-only certificate reached by IP is still rejected). The
+  setup, certificate-check, and firewall provisioning scripts accept an IP SAN
+  instead of failing, and require an exact SAN of the matching type.
+- The exec-isolated API worker now inherits the manager's `--loglevel` and
+  logs request failures and non-2xx HTTP statuses at WARN. Previously they
+  were DEBUG messages in a worker that always ran at INFO, so live failures
+  surfaced only as a generic `OpnsenseRequestFailed`. A redirect failure notes
+  that OPNsense redirects API requests without accepted credentials to its
+  login page. A host-resolution failure names the configured `opnsense_url`
+  and points to `getent ahosts`, because the worker resolves it through glibc
+  `getaddrinfo`/NSS rather than the manager's `dns_servers` resolver.
+
 ## Unreleased
 
 - Expanded Prometheus process observability for the exec-isolated OPNsense API

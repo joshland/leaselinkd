@@ -4,7 +4,7 @@
 if (PHP_SAPI !== 'cli' || posix_geteuid() !== 0) { fwrite(STDERR, "Run as root on OPNsense.\n"); exit(1); }
 require_once('/usr/local/etc/inc/config.inc');
 require_once('/usr/local/etc/inc/auth.inc');
-const VERSION='3.0.5'; const GROUP_NAME='unbound_api'; const USER_NAME='leaselinkd'; const BOOTSTRAP_FILE='/root/leaselinkd-bootstrap.json';
+const VERSION='3.1.0'; const GROUP_NAME='unbound_api'; const USER_NAME='leaselinkd'; const BOOTSTRAP_FILE='/root/leaselinkd-bootstrap.json';
 $privileges=['page-diagnostics-health','page-services-unbound','page-services-dnsresolver-acls','page-services-dnsresolver-advanced','page-services-dnsresolver-overrides','page-services-dnsresolver','page-system-status'];
 $action=$argv[1]??'provision'; $argument=$argv[2]??'';
 if(!in_array($action,['provision','--rotate-api-key','--revoke-api-key'],true)||($action==='--revoke-api-key'&&$argument==='')||count($argv)>($action==='--revoke-api-key'?3:2)){fwrite(STDERR,"Usage: php provision-opnsense-leaselinkd.php [--rotate-api-key | --revoke-api-key API_KEY]\n");exit(64);}
@@ -34,8 +34,8 @@ function tls_audit(): int {
  if(stripos($ext['basicConstraints']??'','CA:FALSE')!==false)$pass('server Basic Constraints is CA:FALSE');else $fail('server certificate must have Basic Constraints CA:FALSE');
  if(stripos($ext['extendedKeyUsage']??'','TLS Web Server Authentication')!==false||stripos($ext['extendedKeyUsage']??'','serverAuth')!==false)$pass('server permits TLS Web Server Authentication');else $fail('server lacks TLS Web Server Authentication extended key usage');
  if(stripos($ext['keyUsage']??'','Digital Signature')!==false)$pass('server Key Usage includes Digital Signature');else $fail('server Key Usage lacks Digital Signature');
- preg_match_all('/(?:^|,\s*)DNS:([^,\s]+)/i',$ext['subjectAltName']??'', $dns);
- if(!empty($dns[1]))$pass('DNS SANs for the Zig API URL: '.implode(', ',$dns[1]));else $fail('server has no DNS SAN; Zig 0.16 cannot use an IP-only SAN');
+ preg_match_all('/(?:^|,\s*)(DNS|IP Address):([^,\s]+)/i',$ext['subjectAltName']??'', $sans);
+ if(!empty($sans[2]))$pass('DNS/IP SANs for the Zig API URL: '.implode(', ',$sans[2]));else $fail('server has no DNS or IP SAN for the Zig API URL');
  $ca=isset($cert['caref'])?find_ref($config['ca']??[],$cert['caref']):null;
  if(!$ca||!($ca_pem=pem($ca))){$fail('server certificate has no readable issuing CA reference');return $bad;}
  $ca_info=openssl_x509_parse($ca_pem,false);printf("  Issuing CA: %s (%s)\n",$ca['descr']??'(unnamed)',$cert['caref']);
@@ -58,4 +58,4 @@ if($action==='--rotate-api-key'&&!$new_user){$ui=find_name(config_read_array('sy
 if($action==='--revoke-api-key'){$ui=find_name(config_read_array('system','user',false),USER_NAME)['i'];$keys=$config['system']['user'][$ui]['apikeys']['item']??[];$remaining=array_values(array_filter($keys,static fn($item)=>($item['key']??'')!==$argument));if(count($remaining)===count($keys))throw new RuntimeException('API key was not found.');if(count($remaining)===0)throw new RuntimeException('Refusing to revoke the final API key. Rotate and validate a replacement first.');$config['system']['user'][$ui]['apikeys']['item']=$remaining;$changed=true;printf("Revoked the requested old API key.\n");}
 if($changed){if(write_config('Provision leaselinkd API user and group')===false)throw new RuntimeException('Configuration save failed.');local_group_set(find_name(config_read_array('system','group',false),GROUP_NAME)['v']);}
 if($new_user||$credential_written){file_put_contents(BOOTSTRAP_FILE,json_encode(['username'=>USER_NAME,'password'=>$password??null,'api_key'=>$key,'api_secret'=>$secret],JSON_PRETTY_PRINT)."\n",LOCK_EX);chmod(BOOTSTRAP_FILE,0600);printf("One-time credentials written to %s (0600).\n",BOOTSTRAP_FILE);}elseif($action==='provision')printf("No credentials rotated; OPNsense cannot recover existing API secrets.\n");
-$failures=tls_audit();if($failures){printf("TLS audit: %d failure(s); correct before using leaselinkd.\n",$failures);exit(2);}printf("TLS audit passed. Use a listed DNS SAN in leaselinkd's API URL.\n");
+$failures=tls_audit();if($failures){printf("TLS audit: %d failure(s); correct before using leaselinkd.\n",$failures);exit(2);}printf("TLS audit passed. Use a listed DNS or IP SAN as the host in leaselinkd's API URL.\n");

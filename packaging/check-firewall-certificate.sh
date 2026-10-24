@@ -123,18 +123,16 @@ else
     warn 'leaf Key Usage does not include Digital Signature'
 fi
 
-# Zig 0.16's native certificate verifier currently compares only dNSName SAN
-# entries. It does not match iPAddress SANs and does not fall back to the CN
-# whenever any SAN extension exists. Treat this as a manager compatibility
-# requirement even though OpenSSL and Python can verify an IP SAN correctly.
-if [[ $host =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-    fail 'leaselinkd cannot use an IP-address API URL with Zig 0.16 TLS; use a DNS hostname with a matching DNS SAN'
+# Zig 0.17's native certificate verifier matches dNSName SANs against a DNS
+# API URL and iPAddress SANs against an IP API URL. It falls back to the CN
+# only for DNS names when no SAN extension exists, so require an exact SAN
+# entry of the matching type.
+sans=$(grep -A1 'Subject Alternative Name' <<<"$details" | tail -n 1 | tr -d ' ' | tr ',' '\n')
+expected_entry=${expected_san// /}
+if grep -Fxq "$expected_entry" <<<"$sans"; then
+    pass "leaf has the SAN required by Zig TLS: ${expected_san}"
 else
-    if grep -Fq "DNS:${host}" <<<"$details"; then
-        pass "leaf has the DNS SAN required by Zig TLS: DNS:${host}"
-    else
-        fail "leaf lacks the DNS SAN required by Zig TLS: DNS:${host}"
-    fi
+    fail "leaf lacks the SAN required by Zig TLS: ${expected_san}"
 fi
 
 printf 'Summary: %d failure(s), %d warning(s).\n' "$failures" "$warnings"

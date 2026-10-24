@@ -13,7 +13,7 @@ firewall-side PHP script over SSH; this program makes no API request until it
 has installed the generated credentials.
 
 Options:
-  --firewall HOST          DNS name in the firewall Web GUI certificate SAN.
+  --firewall HOST          DNS name or IPv4 address in the Web GUI certificate SAN.
   --domain DOMAIN          DNS suffix for Kea host overrides.
   --port PORT              Web GUI HTTPS port (default: 443).
   --firewall-user USER     SSH user for optional transfer (default: root).
@@ -42,7 +42,7 @@ while (($#)); do
 done
 [[ -n $firewall && -n $domain ]] || { usage >&2; exit 64; }
 [[ $port =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || { printf '%s\n' 'Invalid --port.' >&2; exit 64; }
-[[ $firewall != *'/'* && $firewall != *:* ]] || { printf '%s\n' '--firewall must be a DNS hostname, not an IP address or URL.' >&2; exit 64; }
+[[ $firewall != *'/'* && $firewall != *:* ]] || { printf '%s\n' '--firewall must be a DNS hostname or IPv4 address, not a URL.' >&2; exit 64; }
 [[ $domain =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$|^[A-Za-z0-9]$ ]] || { printf '%s\n' 'Invalid --domain.' >&2; exit 64; }
 
 share_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

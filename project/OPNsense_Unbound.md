@@ -63,8 +63,9 @@ events, while still allowing removal events to clear an existing ledger entry.
 The firewall used in the experiment presented an untrusted self-signed TLS
 chain. The probe supports `--insecure` for this manual diagnostic only. The
 Zig manager intentionally verifies HTTPS against the host trust store. Zig
-0.16's native verifier requires the configured API DNS hostname to appear as
-a `DNS:` SAN; an `IP Address:` SAN alone is not sufficient. Install the
+0.17's native verifier requires the configured API host to appear as a SAN of
+the matching type: a `DNS:` SAN for a hostname or an `IP Address:` SAN for an
+IPv4 address. Install the
 firewall CA before production use with the packaged helper:
 
 ```sh

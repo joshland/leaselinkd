@@ -3,25 +3,7 @@ const builtin = @import("builtin");
 const common = @import("common");
 const prometheus = @import("prometheus.zig");
 const httpz = @import("httpz");
-const c = @cImport({
-    @cDefine("_GNU_SOURCE", "1");
-    @cDefine("_FORTIFY_SOURCE", "0");
-    @cInclude("sys/socket.h");
-    @cInclude("sys/types.h");
-    @cInclude("sys/un.h");
-    @cInclude("sys/stat.h");
-    @cInclude("netinet/in.h");
-    @cInclude("arpa/inet.h");
-    @cInclude("poll.h");
-    @cInclude("signal.h");
-    @cInclude("time.h");
-    @cInclude("unistd.h");
-    @cInclude("spawn.h");
-    @cInclude("fcntl.h");
-    @cInclude("sys/wait.h");
-    @cInclude("sys/random.h");
-    @cInclude("sqlite3.h");
-});
+const c = @import("c");
 const Config = struct { opnsense_url: []const u8, allow_insecure_http: bool = false, loglevel: ?[]const u8 = null, db_path: []const u8 = "/var/lib/leaselinkd/dhcpdb.sqlite", listen_type: []const u8 = "unix", socket_path: []const u8 = "/run/leaselinkd/fifo.pipe", tcp_host: []const u8 = "127.0.0.1", tcp_port: u16 = 9080, metrics_enabled: bool = true, metrics_host: []const u8 = "127.0.0.1", metrics_port: u16 = 9108, dns_servers: []const []const u8 = &.{}, domain: []const u8 = "local", managed_description: []const u8 = "Managed by leaselinkd", record_ttl_seconds: i64 = 86400, reconcile_seconds: i64 = 300, queue_max_events: usize = 512, throttle_seconds: i64 = 10, health_check_seconds: i64 = 60, initial_backoff_ms: i64 = 100, max_backoff_ms: i64 = 10000, api_timeout_seconds: i64 = 5, api_test_timeout_seconds: i64 = 60 };
 const Secrets = struct { api_key: ?[]const u8 = null, apik_key: ?[]const u8 = null, api_secret: ?[]const u8 = null, apikey_secret: ?[]const u8 = null };
 const max_pending_events = 512;
@@ -287,7 +269,7 @@ fn addSeconds(base: i64, duration: i64) i64 {
 }
 fn loadRuntime(init: std.process.Init, allocator: std.mem.Allocator, options: CommandOptions) !Runtime {
     const loaded = try loadConfiguration(init, allocator, options);
-    const db_path = try allocator.dupeZ(u8, loaded.config.db_path);
+    const db_path = try allocator.dupeSentinel(u8, loaded.config.db_path, 0);
     var db: ?*c.sqlite3 = null;
     if (c.sqlite3_open(db_path.ptr, &db) != c.SQLITE_OK) return error.SqliteOpenFailed;
     errdefer _ = c.sqlite3_close(db);
@@ -310,12 +292,12 @@ fn loadConfiguration(init: std.process.Init, allocator: std.mem.Allocator, optio
     return .{ .config = config, .key = key, .secret = secret };
 }
 fn validateSqliteAccess(allocator: std.mem.Allocator, db_path: []const u8) !void {
-    const db_path_z = try allocator.dupeZ(u8, db_path);
-    const directory = if (std.mem.lastIndexOfScalar(u8, db_path, '/')) |separator|
+    const db_path_z = try allocator.dupeSentinel(u8, db_path, 0);
+    const directory = if (std.mem.findScalarLast(u8, db_path, '/')) |separator|
         if (separator == 0) "/" else db_path[0..separator]
     else
         ".";
-    const directory_z = try allocator.dupeZ(u8, directory);
+    const directory_z = try allocator.dupeSentinel(u8, directory, 0);
     if (c.access(directory_z.ptr, c.W_OK | c.X_OK) != 0) return error.SqliteDirectoryAccessFailed;
     if (c.access(db_path_z.ptr, c.F_OK) != 0) return;
     if (c.access(db_path_z.ptr, c.R_OK | c.W_OK) != 0) return error.SqliteFileAccessFailed;
@@ -351,7 +333,7 @@ fn listenTcp(host: []const u8, port: u16) !c_int {
     var addr: c.struct_sockaddr_in = std.mem.zeroes(c.struct_sockaddr_in);
     addr.sin_family = c.AF_INET;
     addr.sin_port = c.htons(port);
-    const host_z = try std.heap.page_allocator.dupeZ(u8, host);
+    const host_z = try std.heap.page_allocator.dupeSentinel(u8, host, 0);
     defer std.heap.page_allocator.free(host_z);
     if (c.inet_pton(c.AF_INET, host_z.ptr, &addr.sin_addr) != 1) return error.InvalidTcpHost;
     if (c.bind(fd, .{ .__sockaddr_in__ = &addr }, @sizeOf(c.struct_sockaddr_in)) != 0 or c.listen(fd, max_pending_events) != 0 or c.fcntl(fd, c.F_SETFL, c.fcntl(fd, c.F_GETFL) | c.O_NONBLOCK) < 0) return error.BindFailed;
@@ -368,12 +350,12 @@ const DnsAnswer = struct { addresses: usize = 0, matches: bool = false, rcode: u
 fn dnsServerAddress(server: []const u8) !c.struct_sockaddr_in {
     var host = server;
     var port: u16 = 53;
-    if (std.mem.lastIndexOfScalar(u8, server, ':')) |at| {
+    if (std.mem.findScalarLast(u8, server, ':')) |at| {
         host = server[0..at];
         port = std.fmt.parseInt(u16, server[at + 1 ..], 10) catch return error.InvalidDnsServer;
     }
     if (host.len == 0 or port == 0) return error.InvalidDnsServer;
-    const host_z = try std.heap.page_allocator.dupeZ(u8, host);
+    const host_z = try std.heap.page_allocator.dupeSentinel(u8, host, 0);
     defer std.heap.page_allocator.free(host_z);
     var address = std.mem.zeroes(c.struct_sockaddr_in);
     address.sin_family = c.AF_INET;
@@ -425,7 +407,7 @@ fn buildDnsQuery(query: []u8, id: u16, hostname: []const u8, domain: []const u8)
     query[5] = 1; // QDCOUNT: one question follows the DNS header
     var query_len: usize = 12;
     var fullname: [255]u8 = undefined;
-    const name = std.fmt.bufPrint(&fullname, "{s}.{s}", .{ hostname, domain }) catch return error.InvalidDnsName;
+    const name = std.mem.print(&fullname, "{s}.{s}", .{ hostname, domain }) catch return error.InvalidDnsName;
     try writeDnsName(query, &query_len, name);
     if (query_len + 4 > query.len) return error.InvalidDnsName;
     query[query_len] = 0;
@@ -475,7 +457,7 @@ fn parseDnsReply(query: []const u8, bytes: []const u8, wanted: [4]u8) !DnsAnswer
 fn dnsLookup(server: []const u8, hostname: []const u8, domain: []const u8, ip: []const u8) !DnsAnswer {
     const address = try dnsServerAddress(server);
     var wanted: [4]u8 = undefined;
-    const ip_z = try std.heap.page_allocator.dupeZ(u8, ip);
+    const ip_z = try std.heap.page_allocator.dupeSentinel(u8, ip, 0);
     defer std.heap.page_allocator.free(ip_z);
     if (c.inet_pton(c.AF_INET, ip_z.ptr, &wanted) != 1) return error.InvalidLeaseAddress;
     var query: [512]u8 = undefined;
@@ -540,7 +522,7 @@ test "DNS resolver reports NXDOMAIN and FORMERR" {
 test "DNS resolver rejects truncated replies" {
     var query: [512]u8 = undefined;
     const query_len = try buildDnsQuery(&query, 0x1234, "ranos", "ashbyte.com");
-    var reply: [12]u8 = [_]u8{0} ** 12;
+    var reply: [12]u8 = @splat(0);
     reply[0] = query[0];
     reply[1] = query[1];
     reply[5] = 1;
@@ -595,7 +577,7 @@ test "SQLite persists and coalesces reconfigure intent" {
 fn validateDnsRecord(r: *Runtime, hostname: []const u8, ip: []const u8, startup: bool) !bool {
     var matches = false;
     var fullname_buffer: [255]u8 = undefined;
-    const fullname = std.fmt.bufPrint(&fullname_buffer, "{s}.{s}", .{ hostname, r.config.domain }) catch hostname;
+    const fullname = std.mem.print(&fullname_buffer, "{s}.{s}", .{ hostname, r.config.domain }) catch hostname;
     for (r.config.dns_servers) |server| {
         const answer = dnsLookup(server, hostname, r.config.domain, ip) catch |err| {
             if (startup) common.log(.ERROR, "DNS validation failed: server={s} host={s} fqdn={s} expected_ip={s} error={t}", .{ server, hostname, fullname, ip, err }) else common.log(.WARN, "DNS lookup failed before update: server={s} host={s} fqdn={s} expected_ip={s} error={t}", .{ server, hostname, fullname, ip, err });
@@ -758,7 +740,7 @@ fn processConnection(fd: c_int, r: *Runtime) !void {
         if (raw < 0) continue;
         total += @intCast(raw);
         const request = buffer[0..total];
-        const at = std.mem.indexOf(u8, request, "\r\n\r\n") orelse continue;
+        const at = std.mem.find(u8, request, "\r\n\r\n") orelse continue;
         const content_length = headerContentLength(request[0..at]) orelse {
             common.log(.WARN, "invalid HTTP headers", .{});
             prometheus.leaseRejected();
@@ -816,7 +798,7 @@ fn headerContentLength(headers: []const u8) ?usize {
     _ = lines.next();
     var content_length: ?usize = null;
     while (lines.next()) |line| {
-        const separator = std.mem.indexOfScalar(u8, line, ':') orelse return null;
+        const separator = std.mem.findScalar(u8, line, ':') orelse return null;
         const name = std.mem.trim(u8, line[0..separator], " \t");
         const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return null;
@@ -929,7 +911,7 @@ fn applyDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !vo
     try body.writer.writeByte(':');
     try common.jsonEscape(&body.writer, desired.owner_id);
     try body.writer.writeAll("\"}}");
-    const endpoint = if (desired.uuid) |uuid| try std.fmt.allocPrint(allocator, "/settings/set_host_override/{s}", .{uuid}) else "/settings/add_host_override";
+    const endpoint = if (desired.uuid) |uuid| try allocator.print("/settings/set_host_override/{s}", .{uuid}) else "/settings/add_host_override";
     const response = try apiPost(r, allocator, endpoint, body.written());
     const uuid = desired.uuid orelse try responseUuid(allocator, response);
     try sql(r.db, "BEGIN IMMEDIATE");
@@ -941,7 +923,7 @@ fn applyDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !vo
 }
 fn removeDesired(r: *Runtime, allocator: std.mem.Allocator, desired: Desired) !void {
     if (desired.uuid) |uuid| {
-        const endpoint = try std.fmt.allocPrint(allocator, "/settings/del_host_override/{s}", .{uuid});
+        const endpoint = try allocator.print("/settings/del_host_override/{s}", .{uuid});
         _ = try apiPost(r, allocator, endpoint, "{}");
     }
     try sql(r.db, "BEGIN IMMEDIATE");
@@ -1001,14 +983,14 @@ fn reconcileWithAllocator(r: *Runtime, allocator: std.mem.Allocator) !void {
     for (reply.rows orelse &.{}) |remote| {
         const uuid = remote.uuid orelse continue;
         const description = remote.description orelse continue;
-        const marker = std.mem.lastIndexOf(u8, description, "; leaselinkd:") orelse continue;
+        const marker = std.mem.findLast(u8, description, "; leaselinkd:") orelse continue;
         const suffix = description[marker + "; leaselinkd:".len ..];
-        const colon = std.mem.lastIndexOfScalar(u8, suffix, ':') orelse continue;
+        const colon = std.mem.findScalarLast(u8, suffix, ':') orelse continue;
         const owner = suffix[colon + 1 ..];
         if (try reconcileOwner(r.db, owner, uuid)) {
             try markReconcileSeen(r.db, owner);
         } else {
-            const endpoint = try std.fmt.allocPrint(allocator, "/settings/del_host_override/{s}", .{uuid});
+            const endpoint = try allocator.print("/settings/del_host_override/{s}", .{uuid});
             _ = try apiPost(r, allocator, endpoint, "{}");
             try requestReconfigure(r);
             common.log(.INFO, "reconciliation removed stale managed override uuid={s}", .{uuid});
@@ -1053,7 +1035,7 @@ fn upsert(r: *Runtime, allocator: std.mem.Allocator, lease: common.Lease) !void 
     try body.writer.writeAll("\",\"description\":\"");
     try common.jsonEscape(&body.writer, r.config.managed_description);
     try body.writer.writeAll("\"}}");
-    const endpoint = if (old) |uuid| try std.fmt.allocPrint(allocator, "/settings/set_host_override/{s}", .{uuid}) else "/settings/add_host_override";
+    const endpoint = if (old) |uuid| try allocator.print("/settings/set_host_override/{s}", .{uuid}) else "/settings/add_host_override";
     const response = try apiPost(r, allocator, endpoint, body.written());
     const uuid = if (old) |value| value else try responseUuid(allocator, response);
     try store(r.db, lease.hostname, uuid, lease.@"ip-address");
@@ -1061,7 +1043,7 @@ fn upsert(r: *Runtime, allocator: std.mem.Allocator, lease: common.Lease) !void 
 }
 fn remove(r: *Runtime, allocator: std.mem.Allocator, hostname: []const u8) !void {
     const uuid = (try lookup(r.db, allocator, hostname)) orelse return;
-    const endpoint = try std.fmt.allocPrint(allocator, "/settings/del_host_override/{s}", .{uuid});
+    const endpoint = try allocator.print("/settings/del_host_override/{s}", .{uuid});
     _ = try apiPost(r, allocator, endpoint, "{}");
     try delete(r.db, hostname);
     try requestReconfigure(r);
@@ -1134,8 +1116,8 @@ fn startApiWorker(r: *Runtime) !void {
     if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &sockets) != 0) return error.ApiWorkerSocketFailed;
     const self_path_z: [:0]const u8 = "/proc/self/exe";
     var fd_text: [16]u8 = undefined;
-    const fd_text_z = try std.fmt.bufPrintZ(&fd_text, "{d}", .{3});
-    var argv: [4]?[*:0]const u8 = .{ self_path_z.ptr, "--api-worker-fd", fd_text_z.ptr, null };
+    const fd_text_z = try std.mem.printSentinel(&fd_text, "{d}", .{3}, 0);
+    var argv: [6]?[*:0]const u8 = .{ self_path_z.ptr, "--loglevel", @tagName(common.logLevel()).ptr, "--api-worker-fd", fd_text_z.ptr, null };
     var actions: c.posix_spawn_file_actions_t = undefined;
     if (c.posix_spawn_file_actions_init(&actions) != 0) {
         _ = c.close(sockets[0]);
@@ -1236,7 +1218,11 @@ fn apiWorkerLoop(io: std.Io, configuration: WorkerConfiguration, fd: c_int) void
         readFdExact(fd, body) catch return;
         const started = monotonicMilliseconds();
         const response = apiRequestWithClient(configuration, allocator, &client, if (header.method == 0) .GET else .POST, endpoint, if (header.body_len == 0) null else body) catch |err| {
-            common.log(.DEBUG, "persistent OPNsense worker request failed: {t}", .{err});
+            switch (err) {
+                error.TooManyHttpRedirects => common.log(.WARN, "OPNsense API worker request failed: {t}; OPNsense redirects API requests that carry no accepted credentials to its login page", .{err}),
+                error.UnknownHostName, error.NameServerFailure => common.log(.WARN, "OPNsense API worker request failed: {t}; the system resolver (getaddrinfo via /etc/nsswitch.conf) cannot resolve the host in opnsense_url={s}; check it with getent ahosts", .{ err, configuration.opnsense_url }),
+                else => common.log(.WARN, "OPNsense API worker request failed: {t}", .{err}),
+            }
             writeWorkerResponse(fd, null, @intCast(@max(@as(i64, 0), monotonicMilliseconds() - started))) catch return;
             continue;
         };
@@ -1287,8 +1273,8 @@ fn readFdUntil(fd: c_int, bytes: []u8, deadline: i64) !void {
     }
 }
 fn apiRequestWithClient(configuration: WorkerConfiguration, allocator: std.mem.Allocator, client: *std.http.Client, method: std.http.Method, endpoint: []const u8, body: ?[]const u8) ![]u8 {
-    const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ configuration.opnsense_url, endpoint });
-    const credentials = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ configuration.key, configuration.secret });
+    const url = try allocator.print("{s}{s}", .{ configuration.opnsense_url, endpoint });
+    const credentials = try allocator.print("{s}:{s}", .{ configuration.key, configuration.secret });
     const encoded_len = std.base64.standard.Encoder.calcSize(credentials.len);
     const authorization = try allocator.alloc(u8, "Basic ".len + encoded_len);
     @memcpy(authorization[0..6], "Basic ");
@@ -1296,9 +1282,9 @@ fn apiRequestWithClient(configuration: WorkerConfiguration, allocator: std.mem.A
     var response_storage: [max_api_frame_bytes]u8 = undefined;
     var response = std.Io.Writer.fixed(&response_storage);
     const result = try client.fetch(.{ .location = .{ .url = url }, .method = method, .payload = body, .headers = .{ .authorization = .{ .override = authorization } }, .extra_headers = if (body != null) &.{.{ .name = "content-type", .value = "application/json" }} else &.{}, .redirect_behavior = .not_allowed, .response_writer = &response });
-    const code = @intFromEnum(result.status);
+    const code = @backingInt(result.status);
     if (code < 200 or code >= 300) {
-        common.log(.DEBUG, "OPNsense {s} {s} returned HTTP {d}", .{ @tagName(method), endpoint, code });
+        common.log(.WARN, "OPNsense {s} {s} returned HTTP {d}", .{ @tagName(method), endpoint, code });
         return error.OpnsenseRequestFailed;
     }
     return try allocator.dupe(u8, response.buffered());
