@@ -4,3 +4,7 @@ zig-out
 *.pem
 __pycache__
 state.json
+# makepkg and test artifacts
+pkg/
+*.pkg.tar.zst
+*-tests.tar.gz
